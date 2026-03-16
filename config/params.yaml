@@ -1,0 +1,196 @@
+# RB10 RMPflow RViz Parameters
+
+rmpflow_controller:
+  ros__parameters:
+    control_rate: 100.0
+    visualization_rate: 20.0
+    goal_x: 0.6
+    goal_y: -0.4
+    goal_z: 0.6
+    initial_q: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    default_q: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    joint_limit_buffers: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+    backend_mode: "simulation"
+    hardware_state_topic: "hardware_joint_states"
+    hardware_command_topic: "hardware_joint_command"
+    enable_realtime: false
+    realtime_priority: 80
+    lock_memory: false
+    body_goal: [0.45, 0.0, 0.9]
+    orientation_goal: [0.0, 0.0, 1.0]
+    solve_method: "rmp2"
+    rmp_type: "canonical"
+    graph:
+      node_names:
+        - cspace_target
+        - joint_limits
+        - joint_velocity_cap
+        - tcp_position
+        - target
+        - control_points
+        - collision
+        - damping
+        - body_link4
+        - tcp_orientation
+      cspace_target:
+        parents: [root]
+        parent: root
+        task_map: cspace_target
+        leaf: cspace_target
+        enabled: true
+        target_key: goal
+        link_name: tcp
+        axis: z
+        handcrafted_leaf: none
+        identity_multiplier: 0.0
+      joint_limits:
+        parents: [root]
+        parent: root
+        task_map: joint_limit
+        leaf: joint_limit
+        enabled: true
+        target_key: goal
+        link_name: tcp
+        axis: z
+        handcrafted_leaf: none
+        identity_multiplier: 0.0
+      joint_velocity_cap:
+        parents: [root]
+        parent: root
+        task_map: identity
+        leaf: joint_velocity_cap
+        enabled: true
+        target_key: goal
+        link_name: tcp
+        axis: z
+        handcrafted_leaf: none
+        identity_multiplier: 0.0
+      tcp_position:
+        parents: [root]
+        parent: root
+        task_map: tcp_position
+        leaf: none
+        enabled: true
+        target_key: goal
+        link_name: tcp
+        axis: z
+        handcrafted_leaf: none
+        identity_multiplier: 0.0
+      target:
+        parents: [tcp_position]
+        parent: tcp_position
+        task_map: identity
+        leaf: target
+        enabled: true
+        target_key: goal
+        link_name: tcp
+        axis: z
+        handcrafted_leaf: none
+        identity_multiplier: 0.0
+      control_points:
+        parents: [root]
+        parent: root
+        task_map: control_points
+        leaf: none
+        enabled: true
+        target_key: goal
+        link_name: tcp
+        axis: z
+        handcrafted_leaf: none
+        identity_multiplier: 0.0
+      collision:
+        parents: [control_points]
+        parent: control_points
+        task_map: collision_distance
+        leaf: collision
+        enabled: true
+        target_key: goal
+        link_name: tcp
+        axis: z
+        handcrafted_leaf: none
+        identity_multiplier: 0.0
+      damping:
+        parents: [root]
+        parent: root
+        task_map: identity
+        leaf: damping
+        enabled: true
+        target_key: goal
+        link_name: tcp
+        axis: z
+        handcrafted_leaf: none
+        identity_multiplier: 0.0
+      body_link4:
+        parents: [root]
+        parent: root
+        task_map: link_position
+        leaf: target
+        enabled: false
+        target_key: body_goal
+        link_name: link4
+        axis: z
+        handcrafted_leaf: none
+        identity_multiplier: 0.0
+      tcp_orientation:
+        parents: [root]
+        parent: root
+        task_map: link_orientation_axis
+        leaf: target
+        enabled: false
+        target_key: orientation_goal
+        link_name: tcp
+        axis: z
+        handcrafted_leaf: none
+        identity_multiplier: 0.0
+    root_solve_offset: 0.001
+    cspace_target_metric_scalar: 0.005
+    cspace_target_position_gain: 100.0
+    cspace_target_damping_gain: 50.0
+    cspace_target_robust_position_term_thresh: 0.5
+    cspace_target_inertia: 0.0001
+    joint_limit_metric_scalar: 0.1
+    joint_limit_metric_length_scale: 0.01
+    joint_limit_metric_exploder_eps: 0.001
+    joint_limit_metric_velocity_gate_length_scale: 0.01
+    joint_limit_accel_damper_gain: 200.0
+    joint_limit_accel_potential_gain: 1.0
+    joint_limit_accel_potential_exploder_eps: 0.01
+    joint_limit_accel_potential_exploder_length_scale: 0.1
+    joint_velocity_cap_max_velocity: 1.7
+    joint_velocity_cap_velocity_damping_region: 0.15
+    joint_velocity_cap_damping_gain: 5.0
+    joint_velocity_cap_metric_weight: 0.05
+    target_rmp_accel_p_gain: 50.0
+    target_rmp_accel_d_gain: 70.0
+    target_rmp_accel_norm_eps: 0.075
+    target_rmp_metric_alpha_length_scale: 0.05
+    target_rmp_min_metric_alpha: 0.03
+    target_rmp_max_metric_scalar: 1.0
+    target_rmp_min_metric_scalar: 0.5
+    target_rmp_proximity_metric_boost_scalar: 3.0
+    target_rmp_proximity_metric_boost_length_scale: 0.02
+    collision_rmp_margin: 0.0
+    collision_rmp_damping_gain: 50.0
+    collision_rmp_damping_std_dev: 0.04
+    collision_rmp_damping_robustness_eps: 0.01
+    collision_rmp_damping_velocity_gate_length_scale: 0.01
+    collision_rmp_repulsion_gain: 800.0
+    collision_rmp_repulsion_std_dev: 0.01
+    collision_rmp_metric_modulation_radius: 0.5
+    collision_rmp_metric_scalar: 1.0
+    collision_rmp_metric_exploder_std_dev: 0.02
+    collision_rmp_metric_exploder_eps: 0.001
+    damping_rmp_accel_d_gain: 30.0
+    damping_rmp_metric_scalar: 0.005
+    damping_rmp_inertia: 0.3
+
+interactive_goal:
+  ros__parameters:
+    initial_x: 0.6
+    initial_y: -0.4
+    initial_z: 0.6
+
+obstacle_manager:
+  ros__parameters:
+    num_obstacles: 1
+    default_radius: 0.1
