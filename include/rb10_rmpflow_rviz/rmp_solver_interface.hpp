@@ -16,6 +16,7 @@ struct RmpBatchInput
   RB10Model::JointVector qd{RB10Model::JointVector::Zero()};
   std::unordered_map<std::string, Eigen::Vector3d> vector_targets;
   std::vector<ObstacleSphere> obstacles;
+  std::vector<SectorProximityData> sector_proximity;
   std::unordered_map<std::string, ExternalRmpFeature> external_rmps;
 };
 
@@ -31,6 +32,7 @@ public:
     const JointVector & qd,
     const std::unordered_map<std::string, Eigen::Vector3d> & vector_targets,
     const std::vector<ObstacleSphere> & obstacles,
+    const std::vector<SectorProximityData> & sector_proximity = {},
     const std::unordered_map<std::string, ExternalRmpFeature> & external_rmps = {}) const = 0;
 
   virtual std::vector<RmpSolveResult> solve_batch(
@@ -41,10 +43,11 @@ public:
     for (const auto & input : batch_inputs) {
       results.push_back(solve(
           input.q,
-          input.qd,
-          input.vector_targets,
-          input.obstacles,
-          input.external_rmps));
+        input.qd,
+        input.vector_targets,
+        input.obstacles,
+        input.sector_proximity,
+        input.external_rmps));
     }
     return results;
   }

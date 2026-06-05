@@ -59,6 +59,12 @@ public:
     double time2,
     double gain,
     double lpf_gain);
+  bool send_speedj_degrees_per_sec(
+    const std::array<double, 6> & joint_velocity_deg_s,
+    double time1,
+    double time2,
+    double gain,
+    double lpf_gain);
   bool send_text_command(const std::string & command_text);
   bool send_shutdown_sequence(bool halt_first);
 

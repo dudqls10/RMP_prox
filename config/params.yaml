@@ -6,12 +6,14 @@ rmpflow_controller:
     root_solve_offset: 0.001
 
     # Collision RMP
+    # collision_policy: "repulsive"
+    collision_policy: "wall_following"
     collision_rmp_margin: 0.0
     collision_rmp_damping_gain: 100.0
     collision_rmp_damping_std_dev: 0.01
     collision_rmp_damping_robustness_eps: 0.01
     collision_rmp_damping_velocity_gate_length_scale: 0.01
-    collision_rmp_repulsion_gain: 2000.0
+    collision_rmp_repulsion_gain: 50.0
     collision_rmp_repulsion_std_dev: 0.05
     collision_rmp_metric_modulation_radius: 0.3
     # collision_rmp_metric_scalar: 0.0
@@ -19,8 +21,76 @@ rmpflow_controller:
     collision_rmp_metric_exploder_std_dev: 0.01
     collision_rmp_metric_exploder_eps: 0.1
 
+    d_safe: 0.10
+    d_ref: 0.15
+    d_on: 0.22
+    d_off: 0.30
+    kappa_sigma: 1.0
+    gamma_cbf: 2.0
+    k_dist: 1.0
+    k_vel: 4.0
+    k_safe_0: 8.0
+    k_safe_1: 4.0
+    v_t_max: 0.10
+    v_n_toward_max: 0.03
+    v_n_away_max: 0.10
+    a_safe_max: 0.50
+    m_t: 1.0
+    m_n: 5.0
+    m_max: 100000.0
+    direction_lock_time: 1.0
+    # True means +sector normal points outward from the robot toward the detected sector.
+    wall_following_normal_points_toward_obstacle: true
+    wall_following_nominal_velocity_dt: 0.01
+    wall_following_derivative_filter_alpha: 0.35
+    wall_following_range_scale: 0.001
+    wall_following_minimum_hold_distance: 0.05
+    wall_following_valid_margin: 0.001
+    wall_following_sensor_enabled:
+      - true   # proximity_distance1 -> tof6_1_L
+      - true   # proximity_distance2 -> tof6_1_F
+      - true   # proximity_distance3 -> tof6_1_R
+      - true   # proximity_distance4 -> tof6_1_U
+      - false   # proximity_distance6 -> tof_S
+      - false   # proximity_distance7 -> tof_E
+      - false   # proximity_distance8 -> tof_N
+      - false   # proximity_distance5 -> tof_W
+      - false   # proximity_distance12 -> tof3_1_S
+      - false   # proximity_distance9 -> tof3_1_W
+      - false  # proximity_distance10 -> tof3_1_N
+      - false   # proximity_distance11 -> tof3_1_E
+      - false   # proximity_distance13 -> tof2_1_E
+      - false   # proximity_distance14 -> tof2_1_S
+      - false   # proximity_distance15 -> tof2_1_W
+      - false   # proximity_distance16 -> tof2_1_N
+      - false   # proximity_distance17 -> tof2_E
+      - false   # proximity_distance18 -> tof2_S
+      - false   # proximity_distance19 -> tof2_W
+      - false   # proximity_distance20 -> tof2_N
+    wall_following_range_topics:
+      - "proximity_distance1"
+      - "proximity_distance2"
+      - "proximity_distance3"
+      - "proximity_distance4"
+      - "proximity_distance6"
+      - "proximity_distance7"
+      - "proximity_distance8"
+      - "proximity_distance5"
+      - "proximity_distance12"
+      - "proximity_distance9"
+      - "proximity_distance10"
+      - "proximity_distance11"
+      - "proximity_distance13"
+      - "proximity_distance14"
+      - "proximity_distance15"
+      - "proximity_distance16"
+      - "proximity_distance17"
+      - "proximity_distance18"
+      - "proximity_distance19"
+      - "proximity_distance20"
+
     # Target RMP
-    target_rmp_accel_p_gain: 80.0
+    target_rmp_accel_p_gain: 30.0
     target_rmp_accel_d_gain: 120.0
     target_rmp_accel_norm_eps: 0.08
     target_rmp_metric_alpha_length_scale: 0.01
@@ -45,9 +115,9 @@ rmpflow_controller:
     wrist_axis_target_rmp_proximity_metric_boost_length_scale: 0.01
 
     # Damping RMP
-    damping_rmp_accel_d_gain: 50.0
+    damping_rmp_accel_d_gain: 80.0
     damping_rmp_metric_scalar: 100.0
-    damping_rmp_inertia: 100.0
+    damping_rmp_inertia: 300.0
 
     # C-space Target RMP
     cspace_target_metric_scalar: 0.0
@@ -73,22 +143,23 @@ rmpflow_controller:
     joint_velocity_cap_metric_weight: 100.0
 
     # Command limits
-    max_joint_accel: 20.0
-    command_guard_max_velocity_rad_s: 2.5
+    max_joint_accel: 5.0
+    command_guard_max_velocity_rad_s: 0.5
+    predictive_joint_limit_guard: true
 
 
 
-    control_rate: 100.0
+    control_rate: 200.0
     estimate_velocity_in_controller: false
     controller_velocity_filter_alpha: 0.5
     use_synced_input_velocity_filter: true
     synced_input_velocity_filter_type: "alpha-beta"
-    synced_input_velocity_filter_alpha: 0.35
-    synced_input_velocity_filter_beta: 0.02
+    synced_input_velocity_filter_alpha: 0.7
+    synced_input_velocity_filter_beta: 0.04
     synced_input_velocity_ratio_tolerance: 0.05
     use_velocity_feedback_in_solver: true
-    measured_position_feedback_blend: 0.5
-    measured_velocity_feedback_blend: 1.0
+    measured_position_feedback_blend: 1.0
+    measured_velocity_feedback_blend: 0.6
     visualization_rate: 20.0
     publish_repulsion_metric_markers: true
     repulsion_metric_marker_min_norm: 0.01
@@ -115,6 +186,15 @@ rmpflow_controller:
     hardware_command_topic: "hardware_joint_command"
     joint_state_topic: "joint_states"
     position_command_topic: "position_controllers/commands"
+    publish_position_command: true
+    position_command_state_topic: "/rmp_position_command"
+    # position: move_servo_j(q), velocity: move_speed_j(qd)
+    command_mode: "velocity"
+    # SpeedJ parameters used only when command_mode is velocity.
+    speedj_t1: 0.02
+    speedj_t2: 0.2
+    speedj_gain: 0.05
+    speedj_alpha: 0.1
     publish_joint_states: true
     publish_goal_tf: true
     goal_tf_parent_frame: "base_link"
@@ -619,3 +699,24 @@ proximity_obstacle_bridge:
       - 0.04
       - 0.04
       - 0.04
+
+rb10_api_bridge:
+  ros__parameters:
+    # Used by rb10_api_bridge.py only when command_mode is velocity.
+    # speedj_t1: 0.01
+    # speedj_t2: 0.1
+    # speedj_gain: 0.5
+    # speedj_alpha: 0.5
+    speedj_t1: 0.002
+    speedj_t2: 0.1
+    speedj_gain: 0.005
+    speedj_alpha: 0.1
+
+rb10_direct_bridge:
+  ros__parameters:
+    # Used by the standalone rb10_direct_bridge only when command_mode is velocity.
+    command_mode: "velocity"
+    speedj_t1: 0.02
+    speedj_t2: 0.2
+    speedj_gain: 0.05
+    speedj_alpha: 0.1

@@ -64,6 +64,7 @@ def generate_launch_description():
     servo_t2 = LaunchConfiguration("servo_t2")
     servo_gain = LaunchConfiguration("servo_gain")
     servo_alpha = LaunchConfiguration("servo_alpha")
+    command_mode = LaunchConfiguration("command_mode")
     startup_move_to_default_pose = LaunchConfiguration("startup_move_to_default_pose")
     startup_movej_speed = LaunchConfiguration("startup_movej_speed")
     startup_movej_accel = LaunchConfiguration("startup_movej_accel")
@@ -92,6 +93,7 @@ def generate_launch_description():
     use_velocity_feedback_in_solver = LaunchConfiguration("use_velocity_feedback_in_solver")
     command_guard_max_step_rad = LaunchConfiguration("command_guard_max_step_rad")
     command_guard_max_velocity_rad_s = LaunchConfiguration("command_guard_max_velocity_rad_s")
+    predictive_joint_limit_guard = LaunchConfiguration("predictive_joint_limit_guard")
     bridge_publish_rate = LaunchConfiguration("bridge_publish_rate")
     control_rate = LaunchConfiguration("control_rate")
     visualization_rate = LaunchConfiguration("visualization_rate")
@@ -116,6 +118,9 @@ def generate_launch_description():
         "rmp_flag_topic": "/RMP_flag",
         "rmp_active_flag_value": 1,
         "position_command_topic": "/position_controllers/commands",
+        "publish_position_command": True,
+        "position_command_state_topic": "/rmp_position_command",
+        "command_mode": command_mode,
         "publish_target_q": True,
         "target_q_topic": "/target_q",
         "publish_target_metric": publish_target_metric,
@@ -161,6 +166,7 @@ def generate_launch_description():
         "publish_debug_joint_state_sources": publish_debug_joint_state_sources,
         "command_guard_max_step_rad": command_guard_max_step_rad,
         "command_guard_max_velocity_rad_s": command_guard_max_velocity_rad_s,
+        "predictive_joint_limit_guard": predictive_joint_limit_guard,
         "control_rate": control_rate,
         "visualization_rate": visualization_rate,
         "publish_visualization": publish_visualization,
@@ -176,23 +182,27 @@ def generate_launch_description():
             '"', use_direct_hardware_backend, '" != "true" and "',
             start_api_bridge, '" == "true"',
         ])),
-        parameters=[{
-            "robot_ip": robot_ip,
-            "simulation_mode": cb_simulation,
-            "command_topic": "/position_controllers/commands",
-            "joint_state_topic": "/joint_states",
-            "real_joint_state_source": real_joint_state_source,
-            "publish_rate": bridge_publish_rate,
-            "servo_t1": servo_t1,
-            "servo_t2": servo_t2,
-            "servo_gain": servo_gain,
-            "servo_alpha": servo_alpha,
-            "max_command_step_deg": bridge_max_command_step_deg,
-            "max_command_velocity_deg_s": bridge_max_command_velocity_deg_s,
-            "large_command_jump_warn_deg": bridge_large_command_jump_warn_deg,
-            "stop_on_shutdown": stop_on_shutdown,
-            "shutdown_action": shutdown_action,
-        }],
+        parameters=[
+            params_file,
+            {
+                "robot_ip": robot_ip,
+                "simulation_mode": cb_simulation,
+                "command_mode": command_mode,
+                "command_topic": "/position_controllers/commands",
+                "joint_state_topic": "/joint_states",
+                "real_joint_state_source": real_joint_state_source,
+                "publish_rate": bridge_publish_rate,
+                "servo_t1": servo_t1,
+                "servo_t2": servo_t2,
+                "servo_gain": servo_gain,
+                "servo_alpha": servo_alpha,
+                "max_command_step_deg": bridge_max_command_step_deg,
+                "max_command_velocity_deg_s": bridge_max_command_velocity_deg_s,
+                "large_command_jump_warn_deg": bridge_large_command_jump_warn_deg,
+                "stop_on_shutdown": stop_on_shutdown,
+                "shutdown_action": shutdown_action,
+            },
+        ],
     )
 
     joint_state_adapter = Node(
@@ -409,7 +419,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "use_direct_hardware_backend",
-            default_value="false",
+            default_value="true",
             description=(
                 "Bypass the ROS command bridge and let rmpflow_controller send RB10 API servo "
                 "commands directly while keeping RViz/debug publication alive."
@@ -599,6 +609,11 @@ def generate_launch_description():
             description="ServoJ low-pass filter gain for the internal RB10 bridge.",
         ),
         DeclareLaunchArgument(
+            "command_mode",
+            default_value="velocity",
+            description="RB10 command output mode: position sends move_servo_j, velocity sends move_speed_j.",
+        ),
+        DeclareLaunchArgument(
             "bridge_max_command_step_deg",
             default_value="1.0",
             description="Hard per-cycle joint-step limit for the Python RB10 bridge to avoid hardware safety trips.",
@@ -766,10 +781,18 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "command_guard_max_velocity_rad_s",
-            default_value="2.5",
+            default_value="0.5",
             description=(
                 "Maximum joint velocity allowed by the controller command guard, in radians per "
                 "second."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "predictive_joint_limit_guard",
+            default_value="true",
+            description=(
+                "In velocity command mode, clamp qd using measured_q + qd * dt so the next "
+                "commanded joint position stays inside the configured joint limits."
             ),
         ),
         OpaqueFunction(function=_validate_params_file),

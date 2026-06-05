@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.8)
 project(rb10_rmpflow_rviz)
+include(CTest)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -60,6 +61,7 @@ target_link_libraries(rb10_casadi_graph Eigen3::Eigen ${CASADI_LIBRARY})
 add_library(rb10_pinocchio_rmp
   src/pinocchio_model.cpp
   src/pinocchio_direct_solver.cpp
+  src/sector_wall_following_collision_rmp.cpp
 )
 target_include_directories(rb10_pinocchio_rmp PUBLIC include)
 target_include_directories(
@@ -227,6 +229,23 @@ ament_target_dependencies(
   sensor_msgs
   std_msgs
 )
+
+if(BUILD_TESTING)
+  add_executable(
+    sector_wall_following_collision_rmp_test
+    tests/test_sector_wall_following_collision_rmp.cpp
+  )
+  target_include_directories(sector_wall_following_collision_rmp_test PRIVATE include)
+  target_link_libraries(
+    sector_wall_following_collision_rmp_test
+    Eigen3::Eigen
+    rb10_pinocchio_rmp
+  )
+  add_test(
+    NAME sector_wall_following_collision_rmp_test
+    COMMAND sector_wall_following_collision_rmp_test
+  )
+endif()
 
 install(
   TARGETS

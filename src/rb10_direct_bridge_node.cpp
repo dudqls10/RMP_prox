@@ -8,6 +8,8 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <functional>
@@ -35,6 +37,43 @@ double degrees_to_radians(double degrees)
 double radians_to_degrees(double radians)
 {
   return radians * 180.0 / kPi;
+}
+
+enum class CommandMode
+{
+  kPosition,
+  kVelocity
+};
+
+std::string normalized_command_mode(std::string value)
+{
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
+    return static_cast<char>(std::tolower(character));
+  });
+  return value;
+}
+
+CommandMode parse_command_mode(const std::string & value)
+{
+  const std::string normalized = normalized_command_mode(value);
+  if (normalized == "position" || normalized == "servo_j" || normalized == "servoj") {
+    return CommandMode::kPosition;
+  }
+  if (normalized == "velocity" || normalized == "speed_j" || normalized == "speedj") {
+    return CommandMode::kVelocity;
+  }
+  throw std::runtime_error(
+    "command_mode must be one of: position, velocity, servo_j, speed_j");
+}
+
+const char * command_mode_to_string(CommandMode command_mode)
+{
+  return command_mode == CommandMode::kVelocity ? "velocity" : "position";
+}
+
+const char * rb10_stream_command_name(CommandMode command_mode)
+{
+  return command_mode == CommandMode::kVelocity ? "move_speed_j" : "move_servo_j";
 }
 
 bool command_blocked_by_robot_safety(const Rb10SystemState & state)
@@ -139,6 +178,7 @@ public:
   {
     declare_parameter<std::string>("robot_ip", "192.168.111.50");
     declare_parameter<bool>("simulation_mode", false);
+    declare_parameter<std::string>("command_mode", "velocity");
     declare_parameter<std::string>("command_topic", "/position_controllers/commands");
     declare_parameter<std::string>("joint_state_topic", "/joint_states");
     declare_parameter<std::string>("real_joint_state_source", "measured");
@@ -148,6 +188,10 @@ public:
     declare_parameter<double>("servo_t2", 0.06);
     declare_parameter<double>("servo_gain", 0.035);
     declare_parameter<double>("servo_alpha", 0.3);
+    declare_parameter<double>("speedj_t1", 0.02);
+    declare_parameter<double>("speedj_t2", 0.2);
+    declare_parameter<double>("speedj_gain", 0.05);
+    declare_parameter<double>("speedj_alpha", 0.1);
     declare_parameter<bool>("stop_on_shutdown", true);
     declare_parameter<std::string>("shutdown_action", "halt");
     declare_parameter<bool>("use_velocity_filter", true);
@@ -164,6 +208,7 @@ public:
 
     robot_ip_ = get_parameter("robot_ip").as_string();
     simulation_mode_ = get_parameter("simulation_mode").as_bool();
+    command_mode_ = parse_command_mode(get_parameter("command_mode").as_string());
     command_topic_ = get_parameter("command_topic").as_string();
     joint_state_topic_ = get_parameter("joint_state_topic").as_string();
     real_joint_state_source_ = get_parameter("real_joint_state_source").as_string();
@@ -174,6 +219,10 @@ public:
     servo_t2_ = get_parameter("servo_t2").as_double();
     servo_gain_ = get_parameter("servo_gain").as_double();
     servo_alpha_ = get_parameter("servo_alpha").as_double();
+    speedj_t1_ = get_parameter("speedj_t1").as_double();
+    speedj_t2_ = get_parameter("speedj_t2").as_double();
+    speedj_gain_ = get_parameter("speedj_gain").as_double();
+    speedj_alpha_ = get_parameter("speedj_alpha").as_double();
     stop_on_shutdown_ = get_parameter("stop_on_shutdown").as_bool();
     shutdown_action_ = get_parameter("shutdown_action").as_string();
     use_velocity_filter_ = get_parameter("use_velocity_filter").as_bool();
@@ -248,11 +297,12 @@ public:
     const char * mode_label = simulation_mode_ ? "SIMULATION" : "REAL";
     RCLCPP_INFO(
       get_logger(),
-      "RB10 direct C++ bridge connected to %s in %s mode (%s -> %s)",
+      "RB10 direct C++ bridge connected to %s in %s mode (%s -> %s, command_mode=%s)",
       robot_ip_.c_str(),
       mode_label,
       command_topic_.c_str(),
-      joint_state_topic_.c_str());
+      joint_state_topic_.c_str(),
+      command_mode_to_string(command_mode_));
   }
 
   ~Rb10DirectBridgeNode() override
@@ -271,7 +321,8 @@ private:
         get_logger(),
         *get_clock(),
         1000,
-        "Blocking move_servo_j while an RB10 safety stop is active");
+        "Blocking %s while an RB10 safety stop is active",
+        rb10_stream_command_name(command_mode_));
       return;
     }
     if (msg->data.size() < 6U) {
@@ -289,14 +340,20 @@ private:
       joint_deg[index] = radians_to_degrees(msg->data[index]);
     }
 
-    if (!socket_client_.send_servoj_degrees(
-        joint_deg, servo_t1_, servo_t2_, servo_gain_, servo_alpha_))
+    const bool sent =
+      command_mode_ == CommandMode::kVelocity ?
+      socket_client_.send_speedj_degrees_per_sec(
+        joint_deg, speedj_t1_, speedj_t2_, speedj_gain_, speedj_alpha_) :
+      socket_client_.send_servoj_degrees(
+        joint_deg, servo_t1_, servo_t2_, servo_gain_, servo_alpha_);
+    if (!sent)
     {
       RCLCPP_WARN_THROTTLE(
         get_logger(),
         *get_clock(),
         1000,
-        "Failed to send move_servo_j command to RB10");
+        "Failed to send %s command to RB10",
+        rb10_stream_command_name(command_mode_));
     }
   }
 
@@ -311,7 +368,8 @@ private:
     if (command_blocked && !was_command_blocked) {
       RCLCPP_ERROR(
         get_logger(),
-        "RB10 safety stop active; blocking move_servo_j commands (%s)",
+        "RB10 safety stop active; blocking %s commands (%s)",
+        rb10_stream_command_name(command_mode_),
         robot_safety_summary(state).c_str());
     } else if (!command_blocked && was_command_blocked) {
       RCLCPP_INFO(get_logger(), "RB10 safety stop cleared; servo commands may resume");
@@ -495,6 +553,14 @@ private:
     }
 
     if (stop_on_shutdown_ && socket_client_.is_connected()) {
+      if (command_mode_ == CommandMode::kVelocity) {
+        std::array<double, 6> zero_velocity_deg_s{};
+        if (!socket_client_.send_speedj_degrees_per_sec(
+            zero_velocity_deg_s, speedj_t1_, speedj_t2_, speedj_gain_, speedj_alpha_))
+        {
+          RCLCPP_WARN(get_logger(), "Failed to send zero move_speed_j during shutdown");
+        }
+      }
       const bool halt_first = shutdown_action_ != "pause";
       const bool stopped = socket_client_.send_shutdown_sequence(halt_first);
       if (stopped) {
@@ -509,6 +575,7 @@ private:
 
   std::string robot_ip_;
   bool simulation_mode_{false};
+  CommandMode command_mode_{CommandMode::kPosition};
   std::string command_topic_;
   std::string joint_state_topic_;
   std::string real_joint_state_source_{"measured"};
@@ -518,6 +585,10 @@ private:
   double servo_t2_{0.06};
   double servo_gain_{0.035};
   double servo_alpha_{0.3};
+  double speedj_t1_{0.02};
+  double speedj_t2_{0.2};
+  double speedj_gain_{0.05};
+  double speedj_alpha_{0.1};
   bool stop_on_shutdown_{true};
   std::string shutdown_action_{"halt"};
   bool use_velocity_filter_{true};

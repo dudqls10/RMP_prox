@@ -764,7 +764,7 @@ def SendCOMMAND(str, cmd_type):
 
     str_space = str + ' '
 
-    if 'move_servo_j' in str:  # Allow servo_j commands to be sent freely
+    if 'move_servo_j' in str or 'move_speed_j' in str:  # Allow streaming joint commands to be sent freely
         CMDSock.send(str_space.encode('utf-8'))
         return True
 

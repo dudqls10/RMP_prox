@@ -209,6 +209,57 @@ bool Rb10SocketClient::send_servoj_degrees(
   return true;
 }
 
+bool Rb10SocketClient::send_speedj_degrees_per_sec(
+  const std::array<double, 6> & joint_velocity_deg_s,
+  double time1,
+  double time2,
+  double gain,
+  double lpf_gain)
+{
+  {
+    std::unique_lock<std::mutex> lock(command_ack_mutex_);
+    const bool ready_to_send = command_ack_cv_.wait_for(
+      lock,
+      std::chrono::milliseconds(50),
+      [this]() {
+        return !servo_command_response_pending_ || !running_.load() || !connected_.load();
+      });
+    if (!ready_to_send) {
+      servo_command_response_pending_ = false;
+      if (log_callback_) {
+        log_callback_(
+          "[socket] timed out waiting for an RB10 command response before sending the next move_speed_j");
+      }
+      return false;
+    }
+    if (!is_connected()) {
+      return false;
+    }
+    servo_command_response_pending_ = true;
+  }
+
+  std::ostringstream command_stream;
+  command_stream << std::fixed << std::setprecision(3);
+  command_stream << "move_speed_j(jnt[";
+  for (std::size_t index = 0; index < joint_velocity_deg_s.size(); ++index) {
+    if (index > 0U) {
+      command_stream << ",";
+    }
+    command_stream << joint_velocity_deg_s[index];
+  }
+  command_stream << "],";
+  command_stream << std::setprecision(6) << time1 << "," << time2 << "," << gain << "," << lpf_gain << ")";
+  if (!send_text_command(command_stream.str())) {
+    {
+      std::scoped_lock lock(command_ack_mutex_);
+      servo_command_response_pending_ = false;
+    }
+    command_ack_cv_.notify_all();
+    return false;
+  }
+  return true;
+}
+
 bool Rb10SocketClient::send_text_command(const std::string & command_text)
 {
   if (!is_connected()) {

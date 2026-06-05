@@ -204,6 +204,13 @@ PinocchioDirectRmpSolver::PinocchioDirectRmpSolver(
 : config_(std::move(config)),
   model_(std::make_shared<PinocchioModel>(urdf_path))
 {
+  if (
+    config_.collision.policy != "repulsive" &&
+    config_.collision.policy != "wall_following")
+  {
+    throw std::runtime_error(
+            "collision_policy must be one of: repulsive, wall_following");
+  }
   auto impl = std::make_shared<SolverImpl>();
   impl->topo_indices = build_topological_order(config_);
   impl->node_dims.emplace("root", 6);
@@ -228,6 +235,7 @@ RmpSolveResult PinocchioDirectRmpSolver::solve(
   const JointVector & qd,
   const std::unordered_map<std::string, Eigen::Vector3d> & vector_targets,
   const std::vector<ObstacleSphere> & obstacles,
+  const std::vector<SectorProximityData> & sector_proximity,
   const std::unordered_map<std::string, ExternalRmpFeature> & external_rmps) const
 {
   const auto context = model_->forward_context(q, qd);
@@ -250,24 +258,102 @@ RmpSolveResult PinocchioDirectRmpSolver::solve(
       Eigen::VectorXd::Zero(6)
     });
 
+  const std::vector<ObstacleSphere> empty_obstacles;
+  const bool use_wall_following_collision = config_.collision.policy == "wall_following";
   for (const auto index : impl.topo_indices) {
     const auto & node = config_.graph_nodes[index];
 
-    const auto geometry = evaluate_node(node, q, context, obstacles, cache);
-    cache[node.name] = geometry;
-
-    accumulate_leaf_type(
-      node.leaf_rmp_type, node, geometry, qd, cache, vector_targets, external_rmps, metric, force);
-    accumulate_leaf_type(
-      node.handcrafted_leaf_rmp_type,
+    const auto geometry = evaluate_node(
       node,
-      geometry,
-      qd,
-      cache,
-      vector_targets,
-      external_rmps,
-      metric,
-      force);
+      q,
+      context,
+      use_wall_following_collision ? empty_obstacles : obstacles,
+      cache);
+    cache[node.name] = geometry;
+  }
+
+  JointVector nominal_qd_without_collision = qd;
+  if (use_wall_following_collision) {
+    // Use a one-control-period velocity prediction from all non-collision RMPs
+    // as the module-local nominal goal motion for tangential projection.
+    Matrix6 nominal_metric = Matrix6::Zero();
+    JointVector nominal_force = JointVector::Zero();
+    for (const auto index : impl.topo_indices) {
+      const auto & node = config_.graph_nodes[index];
+      const auto geometry_it = cache.find(node.name);
+      if (geometry_it == cache.end()) {
+        continue;
+      }
+      if (node.leaf_rmp_type != "collision") {
+        accumulate_leaf_type(
+          node.leaf_rmp_type,
+          node,
+          geometry_it->second,
+          qd,
+          cache,
+          vector_targets,
+          external_rmps,
+          nominal_metric,
+          nominal_force);
+      }
+      if (node.handcrafted_leaf_rmp_type != "collision") {
+        accumulate_leaf_type(
+          node.handcrafted_leaf_rmp_type,
+          node,
+          geometry_it->second,
+          qd,
+          cache,
+          vector_targets,
+          external_rmps,
+          nominal_metric,
+          nominal_force);
+      }
+    }
+    const JointVector nominal_qdd = use_rmp2 ?
+      resolve_root_rmp2(nominal_metric, nominal_force, config_.solve_offset) :
+      resolve_root_direct(nominal_metric, nominal_force, config_.solve_offset);
+    nominal_qd_without_collision =
+      qd + std::max(0.0, config_.wall_following_collision.nominal_velocity_dt) * nominal_qdd;
+  }
+
+  for (const auto index : impl.topo_indices) {
+    const auto & node = config_.graph_nodes[index];
+    const auto & geometry = cache.at(node.name);
+    const auto accumulate_leaf = [&](const std::string & leaf_type) {
+        if (
+          leaf_type == "collision" &&
+          use_wall_following_collision)
+        {
+          const std::string control_points_node =
+            node.parents.empty() ? std::string("control_points") : node.parents.front();
+          const auto control_points_it = cache.find(control_points_node);
+          if (control_points_it == cache.end()) {
+            throw std::runtime_error(
+                    "wall_following collision requires parent control point geometry");
+          }
+          accumulate_wall_following_collision(
+            control_points_it->second,
+            context,
+            qd,
+            nominal_qd_without_collision,
+            sector_proximity,
+            metric,
+            force);
+          return;
+        }
+        accumulate_leaf_type(
+          leaf_type,
+          node,
+          geometry,
+          qd,
+          cache,
+          vector_targets,
+          external_rmps,
+          metric,
+          force);
+      };
+    accumulate_leaf(node.leaf_rmp_type);
+    accumulate_leaf(node.handcrafted_leaf_rmp_type);
   }
 
   JointVector qdd = use_rmp2 ?
@@ -288,6 +374,7 @@ std::vector<RmpSolveResult> PinocchioDirectRmpSolver::solve_batch(
         input.qd,
         input.vector_targets,
         input.obstacles,
+        input.sector_proximity,
         input.external_rmps));
   }
   return results;
@@ -1320,6 +1407,96 @@ void PinocchioDirectRmpSolver::accumulate_collision(
       metric_scalar,
       repel + damping,
       geometry.curvature[row],
+      metric,
+      force);
+  }
+}
+
+void PinocchioDirectRmpSolver::accumulate_wall_following_collision(
+  const NodeGeometry & control_point_geometry,
+  const KinematicsContext & context,
+  const JointVector & qd,
+  const JointVector & nominal_qd_without_collision,
+  const std::vector<SectorProximityData> & sector_proximity,
+  Matrix6 & metric,
+  JointVector & force) const
+{
+  (void)qd;
+  if (sector_proximity.empty()) {
+    return;
+  }
+
+  const bool use_natural_rmp = uses_rmp2_solve() && uses_natural_rmp();
+  const auto & modules = default_sector_wall_modules();
+  if (wall_following_states_.size() != modules.size()) {
+    wall_following_states_.assign(modules.size(), SectorWallFollowingCollisionRMP::State{});
+  }
+
+  const SectorWallFollowingCollisionRMP wall_following(config_.wall_following_collision);
+  for (std::size_t module_index = 0; module_index < modules.size(); ++module_index) {
+    if (module_index >= sector_proximity.size() || !sector_proximity[module_index].enabled) {
+      wall_following_states_[module_index].active = false;
+      continue;
+    }
+
+    const auto & module = modules[module_index];
+    Eigen::Vector3d position = Eigen::Vector3d::Zero();
+    Eigen::Matrix<double, 3, 6> jacobian = Eigen::Matrix<double, 3, 6>::Zero();
+    Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
+    Eigen::Vector3d curvature = Eigen::Vector3d::Zero();
+    int valid_points = 0;
+    for (const auto point_index : module.control_point_indices) {
+      const Eigen::Index offset = static_cast<Eigen::Index>(3 * point_index);
+      if (
+        offset + 2 >= control_point_geometry.x.size() ||
+        offset + 2 >= control_point_geometry.velocity.size() ||
+        offset + 2 >= control_point_geometry.curvature.size() ||
+        control_point_geometry.jacobian.rows() <= offset + 2)
+      {
+        continue;
+      }
+      position += control_point_geometry.x.segment<3>(offset);
+      jacobian += control_point_geometry.jacobian.block<3, 6>(offset, 0);
+      velocity += control_point_geometry.velocity.segment<3>(offset);
+      curvature += control_point_geometry.curvature.segment<3>(offset);
+      ++valid_points;
+    }
+    if (valid_points == 0) {
+      continue;
+    }
+
+    const double inv_valid_points = 1.0 / static_cast<double>(valid_points);
+    position *= inv_valid_points;
+    (void)position;
+    jacobian *= inv_valid_points;
+    velocity *= inv_valid_points;
+    curvature *= inv_valid_points;
+
+    SectorWallFollowingCollisionRMP::Input input;
+    const auto & proximity = sector_proximity[module_index];
+    input.distances = proximity.distances;
+    input.sigmas = proximity.sigmas;
+    input.has_sigma = proximity.has_sigma;
+    input.valid = proximity.valid;
+    input.time_sec = proximity.stamp_sec;
+    input.xdot = velocity;
+    input.v_goal = jacobian * nominal_qd_without_collision;
+    for (std::size_t sector = 0; sector < kWallFollowingSectorCount; ++sector) {
+      input.normals_world[sector] =
+        context.link_rotations[module.parent_link] * module.local_normals[sector];
+    }
+
+    const auto leaf =
+      wall_following.evaluate(input, wall_following_states_[module_index]);
+    if (leaf.metric.cwiseAbs().maxCoeff() <= 0.0 && leaf.acceleration.norm() <= 0.0) {
+      continue;
+    }
+    accumulate_vector_leaf(
+      use_natural_rmp,
+      jacobian,
+      leaf.metric,
+      leaf.acceleration,
+      curvature,
       metric,
       force);
   }

@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <condition_variable>
 #include <functional>
@@ -16,6 +17,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -30,6 +32,7 @@
 #include "realtime_tools/realtime_buffer.hpp"
 #include "realtime_tools/realtime_publisher.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
+#include "sensor_msgs/msg/range.hpp"
 #include "std_msgs/msg/color_rgba.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "std_msgs/msg/u_int8.hpp"
@@ -55,6 +58,16 @@ using Float64ArrayRtPublisher =
 using PoseRtPublisher = realtime_tools::RealtimePublisher<geometry_msgs::msg::Pose>;
 constexpr double kPi = 3.14159265358979323846;
 
+std::vector<std::string> default_wall_following_range_topics()
+{
+  std::vector<std::string> topics;
+  topics.reserve(RB10Model::sensor_control_points.size());
+  for (std::size_t index = 0; index < RB10Model::sensor_control_points.size(); ++index) {
+    topics.emplace_back("proximity_distance" + std::to_string(index + 1));
+  }
+  return topics;
+}
+
 double degrees_to_radians(double degrees)
 {
   return degrees * kPi / 180.0;
@@ -70,6 +83,43 @@ struct RobotState
   JointVector q{JointVector::Zero()};
   JointVector qd{JointVector::Zero()};
 };
+
+enum class CommandMode
+{
+  kPosition,
+  kVelocity
+};
+
+std::string normalized_command_mode(std::string value)
+{
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
+    return static_cast<char>(std::tolower(character));
+  });
+  return value;
+}
+
+CommandMode parse_command_mode(const std::string & value)
+{
+  const std::string normalized = normalized_command_mode(value);
+  if (normalized == "position" || normalized == "servo_j" || normalized == "servoj") {
+    return CommandMode::kPosition;
+  }
+  if (normalized == "velocity" || normalized == "speed_j" || normalized == "speedj") {
+    return CommandMode::kVelocity;
+  }
+  throw std::runtime_error(
+    "command_mode must be one of: position, velocity, servo_j, speed_j");
+}
+
+const char * command_mode_to_string(CommandMode command_mode)
+{
+  return command_mode == CommandMode::kVelocity ? "velocity" : "position";
+}
+
+const char * rb10_stream_command_name(CommandMode command_mode)
+{
+  return command_mode == CommandMode::kVelocity ? "move_speed_j" : "move_servo_j";
+}
 
 struct TcpAccelerationSample
 {
@@ -435,9 +485,11 @@ public:
     rclcpp::Node * node,
     const JointVector & initial_q,
     const std::string & state_topic,
-    const std::string & command_topic)
+    const std::string & command_topic,
+    CommandMode command_mode)
   : node_(node)
   , state_topic_(state_topic)
+  , command_mode_(command_mode)
   {
     RobotState initial_state;
     initial_state.q = initial_q;
@@ -468,7 +520,9 @@ public:
     }
 
     std_msgs::msg::Float64MultiArray command;
-    command.data.assign(command_state.q.data(), command_state.q.data() + command_state.q.size());
+    const JointVector & command_vector =
+      command_mode_ == CommandMode::kVelocity ? command_state.qd : command_state.q;
+    command.data.assign(command_vector.data(), command_vector.data() + command_vector.size());
 
     command_pub_->publish(command);
   }
@@ -494,6 +548,7 @@ private:
 
   rclcpp::Node * node_;
   std::string state_topic_;
+  CommandMode command_mode_{CommandMode::kPosition};
   realtime_tools::RealtimeBuffer<RobotState> state_buffer_;
   std::atomic<bool> state_received_{false};
   bool logged_initial_state_{false};
@@ -511,12 +566,17 @@ public:
     bool simulation_mode,
     const std::string & real_joint_state_source,
     bool publish_debug_joint_state_sources,
+    CommandMode command_mode,
     double data_request_rate_hz,
     double control_rate_hz,
     double servo_t1,
     double servo_t2,
     double servo_gain,
     double servo_alpha,
+    double speedj_t1,
+    double speedj_t2,
+    double speedj_gain,
+    double speedj_alpha,
     bool use_synced_input_velocity_filter,
     double synced_input_velocity_filter_alpha,
     double synced_input_velocity_filter_beta,
@@ -536,10 +596,15 @@ public:
     simulation_mode_(simulation_mode),
     real_joint_state_source_(real_joint_state_source),
     publish_debug_joint_state_sources_(publish_debug_joint_state_sources),
+    command_mode_(command_mode),
     servo_t1_(servo_t1),
     servo_t2_(servo_t2),
     servo_gain_(servo_gain),
     servo_alpha_(servo_alpha),
+    speedj_t1_(speedj_t1),
+    speedj_t2_(speedj_t2),
+    speedj_gain_(speedj_gain),
+    speedj_alpha_(speedj_alpha),
     use_synced_input_velocity_filter_(use_synced_input_velocity_filter),
     startup_move_to_default_pose_(startup_move_to_default_pose),
     startup_movej_speed_(startup_movej_speed),
@@ -634,6 +699,14 @@ public:
   ~DirectRb10Backend() override
   {
     stop_servo_command_thread();
+    if (command_mode_ == CommandMode::kVelocity && socket_client_.is_connected()) {
+      std::array<double, 6> zero_velocity_deg_s{};
+      if (!socket_client_.send_speedj_degrees_per_sec(
+          zero_velocity_deg_s, speedj_t1_, speedj_t2_, speedj_gain_, speedj_alpha_))
+      {
+        RCLCPP_WARN(node_->get_logger(), "Direct RB10 backend failed to send zero move_speed_j on shutdown");
+      }
+    }
     if (stop_on_shutdown_ && socket_client_.is_connected()) {
       const bool halt_first = shutdown_action_ != "pause";
       const bool stopped = socket_client_.send_shutdown_sequence(halt_first);
@@ -670,13 +743,16 @@ public:
         node_->get_logger(),
         *node_->get_clock(),
         1000,
-        "Direct RB10 backend is blocking move_servo_j while a robot safety stop is active");
+        "Direct RB10 backend is blocking %s while a robot safety stop is active",
+        rb10_stream_command_name(command_mode_));
       return;
     }
 
     std::array<double, 6> joint_deg{};
+    const JointVector & command_vector =
+      command_mode_ == CommandMode::kVelocity ? command_state.qd : command_state.q;
     for (std::size_t index = 0; index < 6U; ++index) {
-      joint_deg[index] = radians_to_degrees(command_state.q[static_cast<int>(index)]);
+      joint_deg[index] = radians_to_degrees(command_vector[static_cast<int>(index)]);
     }
     queue_servo_command(joint_deg);
   }
@@ -731,14 +807,20 @@ private:
         latest_servo_joint_deg_.get(joint_deg);
       }
 
-      if (!socket_client_.send_servoj_degrees(
-          joint_deg, servo_t1_, servo_t2_, servo_gain_, servo_alpha_))
+      const bool sent =
+        command_mode_ == CommandMode::kVelocity ?
+        socket_client_.send_speedj_degrees_per_sec(
+          joint_deg, speedj_t1_, speedj_t2_, speedj_gain_, speedj_alpha_) :
+        socket_client_.send_servoj_degrees(
+          joint_deg, servo_t1_, servo_t2_, servo_gain_, servo_alpha_);
+      if (!sent)
       {
         RCLCPP_WARN_THROTTLE(
           node_->get_logger(),
           *node_->get_clock(),
           1000,
-          "Direct RB10 backend failed to send move_servo_j command");
+          "Direct RB10 backend failed to send %s command",
+          rb10_stream_command_name(command_mode_));
       }
     }
   }
@@ -769,7 +851,8 @@ private:
       clear_pending_servo_command();
       RCLCPP_ERROR(
         node_->get_logger(),
-        "RB10 safety stop active; blocking move_servo_j commands (%s)",
+        "RB10 safety stop active; blocking %s commands (%s)",
+        rb10_stream_command_name(command_mode_),
         robot_safety_summary(state).c_str());
     } else if (!command_blocked && was_command_blocked) {
       RCLCPP_INFO(node_->get_logger(), "RB10 safety stop cleared; servo commands may resume");
@@ -877,10 +960,15 @@ private:
   bool simulation_mode_{false};
   std::string real_joint_state_source_{"measured"};
   bool publish_debug_joint_state_sources_{false};
+  CommandMode command_mode_{CommandMode::kPosition};
   double servo_t1_{0.002};
   double servo_t2_{0.03};
   double servo_gain_{0.06};
   double servo_alpha_{0.45};
+  double speedj_t1_{0.02};
+  double speedj_t2_{0.2};
+  double speedj_gain_{0.05};
+  double speedj_alpha_{0.1};
   bool use_synced_input_velocity_filter_{false};
   bool startup_move_to_default_pose_{true};
   std::array<double, 6> startup_home_joints_deg_{};
@@ -954,6 +1042,7 @@ public:
     declare_parameter("default_q", std::vector<double>{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
     declare_parameter("joint_limit_buffers", std::vector<double>{0.01, 0.01, 0.01, 0.01, 0.01, 0.01});
     declare_parameter("backend_mode", "simulation");
+    declare_parameter("command_mode", "velocity");
     declare_parameter("robot_ip", "192.168.111.50");
     declare_parameter("simulation_mode", false);
     declare_parameter("real_joint_state_source", "measured");
@@ -971,6 +1060,8 @@ public:
     declare_parameter("rmp_flag_topic", "/RMP_flag");
     declare_parameter("rmp_active_flag_value", 1);
     declare_parameter("position_command_topic", "position_controllers/commands");
+    declare_parameter("publish_position_command", true);
+    declare_parameter("position_command_state_topic", "/rmp_position_command");
     declare_parameter("publish_target_q", false);
     declare_parameter("target_q_topic", "/target_q");
     declare_parameter("publish_target_metric", false);
@@ -994,6 +1085,10 @@ public:
     declare_parameter("servo_t2", 0.03);
     declare_parameter("servo_gain", 0.06);
     declare_parameter("servo_alpha", 0.45);
+    declare_parameter("speedj_t1", 0.02);
+    declare_parameter("speedj_t2", 0.2);
+    declare_parameter("speedj_gain", 0.05);
+    declare_parameter("speedj_alpha", 0.1);
     declare_parameter("startup_move_to_default_pose", true);
     declare_parameter(
       "startup_home_joints_deg",
@@ -1047,6 +1142,7 @@ public:
     declare_parameter("target_rmp_accel_d_gain", 70.0);
     declare_parameter("command_guard_max_step_rad", 0.00436332313);
     declare_parameter("command_guard_max_velocity_rad_s", 0.436332313);
+    declare_parameter("predictive_joint_limit_guard", true);
     declare_parameter("target_rmp_accel_norm_eps", 0.075);
     declare_parameter("target_rmp_metric_alpha_length_scale", 0.05);
     declare_parameter("target_rmp_min_metric_alpha", 0.03);
@@ -1064,6 +1160,7 @@ public:
     declare_parameter("wrist_axis_target_rmp_metric_scalar", 1000.0);
     declare_parameter("wrist_axis_target_rmp_proximity_metric_boost_scalar", 1.0);
     declare_parameter("wrist_axis_target_rmp_proximity_metric_boost_length_scale", 0.01);
+    declare_parameter("collision_policy", "wall_following");
     declare_parameter("collision_rmp_margin", 0.0);
     declare_parameter("collision_rmp_damping_gain", 50.0);
     declare_parameter("collision_rmp_damping_std_dev", 0.04);
@@ -1075,6 +1172,32 @@ public:
     declare_parameter("collision_rmp_metric_scalar", 1.0);
     declare_parameter("collision_rmp_metric_exploder_std_dev", 0.02);
     declare_parameter("collision_rmp_metric_exploder_eps", 0.001);
+    declare_parameter("d_safe", 0.10);
+    declare_parameter("d_ref", 0.15);
+    declare_parameter("d_on", 0.22);
+    declare_parameter("d_off", 0.30);
+    declare_parameter("kappa_sigma", 1.0);
+    declare_parameter("gamma_cbf", 2.0);
+    declare_parameter("k_dist", 1.0);
+    declare_parameter("k_vel", 4.0);
+    declare_parameter("k_safe_0", 8.0);
+    declare_parameter("k_safe_1", 4.0);
+    declare_parameter("v_t_max", 0.10);
+    declare_parameter("v_n_toward_max", 0.03);
+    declare_parameter("v_n_away_max", 0.10);
+    declare_parameter("a_safe_max", 0.50);
+    declare_parameter("m_t", 1.0);
+    declare_parameter("m_n", 5.0);
+    declare_parameter("m_max", 50.0);
+    declare_parameter("direction_lock_time", 1.0);
+    declare_parameter("wall_following_normal_points_toward_obstacle", true);
+    declare_parameter("wall_following_nominal_velocity_dt", 0.01);
+    declare_parameter("wall_following_derivative_filter_alpha", 0.35);
+    declare_parameter("wall_following_range_topics", default_wall_following_range_topics());
+    declare_parameter("wall_following_sensor_enabled", std::vector<bool>{});
+    declare_parameter("wall_following_range_scale", 0.001);
+    declare_parameter("wall_following_minimum_hold_distance", 0.05);
+    declare_parameter("wall_following_valid_margin", 1e-3);
     declare_parameter("damping_rmp_accel_d_gain", 30.0);
     declare_parameter("damping_rmp_metric_scalar", 0.005);
     declare_parameter("damping_rmp_inertia", 0.3);
@@ -1115,12 +1238,20 @@ public:
     controller_velocity_filter_alpha_ = std::clamp(
       get_parameter("controller_velocity_filter_alpha").as_double(), 0.0, 1.0);
     max_joint_accel_ = get_parameter("max_joint_accel").as_double();
+    command_mode_ = parse_command_mode(get_parameter("command_mode").as_string());
     command_guard_max_step_rad_ = std::max(
       get_parameter("command_guard_max_step_rad").as_double(),
       1e-4);
+    const double configured_max_velocity =
+      get_parameter("command_guard_max_velocity_rad_s").as_double();
     command_guard_max_velocity_rad_s_ = std::max(
-      get_parameter("command_guard_max_velocity_rad_s").as_double(),
-      command_guard_max_step_rad_ * control_rate_hz_);
+      configured_max_velocity,
+      command_mode_ == CommandMode::kVelocity ? 1e-4 : command_guard_max_step_rad_ * control_rate_hz_);
+    predictive_joint_limit_guard_ = get_parameter("predictive_joint_limit_guard").as_bool();
+    const auto joint_limit_buffers = get_parameter("joint_limit_buffers").as_double_array();
+    for (std::size_t index = 0; index < std::min<std::size_t>(joint_limit_buffers.size(), 6); ++index) {
+      joint_limit_buffers_[index] = std::max(0.0, joint_limit_buffers[index]);
+    }
     if (use_synced_input_velocity_filter && estimate_velocity_in_controller_) {
       RCLCPP_WARN(
         get_logger(),
@@ -1136,6 +1267,8 @@ public:
     obstacles_box_.set(std::vector<ObstacleSphere>{ObstacleSphere{}});
     proximity_sensor_obstacles_box_.set(
       std::vector<std::optional<ObstacleSphere>>(RB10Model::sensor_control_points.size()));
+    wall_following_proximity_box_.set(
+      std::vector<SectorProximityData>(default_sector_wall_modules().size()));
     tcp_accel_visualization_box_.set(TcpAccelerationSample{});
     const auto solver_config = build_solver_config();
     target_metric_params_ = solver_config.target;
@@ -1143,6 +1276,14 @@ public:
     configure_external_rmp_inputs(solver_config.graph_nodes);
     solver_ = build_solver(solver_config);
     body_obstacles_visual_ = solver_config.body_obstacles;
+    wall_following_range_scale_ = get_parameter("wall_following_range_scale").as_double();
+    wall_following_minimum_hold_distance_ =
+      std::max(0.0, get_parameter("wall_following_minimum_hold_distance").as_double());
+    wall_following_valid_margin_ =
+      std::max(0.0, get_parameter("wall_following_valid_margin").as_double());
+    if (solver_config.collision.policy == "wall_following") {
+      configure_wall_following_range_inputs();
+    }
 
     publish_joint_states_enabled_ = get_parameter("publish_joint_states").as_bool();
     publish_visualization_enabled_ = get_parameter("publish_visualization").as_bool();
@@ -1176,6 +1317,12 @@ public:
       direct_command_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
         get_parameter("position_command_topic").as_string(), 10);
       rt_direct_command_pub_ = std::make_shared<Float64ArrayRtPublisher>(direct_command_pub_);
+    }
+    if (get_parameter("publish_position_command").as_bool()) {
+      position_command_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
+        get_parameter("position_command_state_topic").as_string(), 10);
+      rt_position_command_pub_ =
+        std::make_shared<Float64ArrayRtPublisher>(position_command_pub_);
     }
     if (get_parameter("publish_target_q").as_bool()) {
       target_q_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
@@ -1248,12 +1395,17 @@ public:
         get_parameter("simulation_mode").as_bool(),
         get_parameter("real_joint_state_source").as_string(),
         get_parameter("publish_debug_joint_state_sources").as_bool(),
+        command_mode_,
         get_parameter("hardware_data_request_rate").as_double(),
         get_parameter("control_rate").as_double(),
         get_parameter("servo_t1").as_double(),
         get_parameter("servo_t2").as_double(),
         get_parameter("servo_gain").as_double(),
         get_parameter("servo_alpha").as_double(),
+        get_parameter("speedj_t1").as_double(),
+        get_parameter("speedj_t2").as_double(),
+        get_parameter("speedj_gain").as_double(),
+        get_parameter("speedj_alpha").as_double(),
         get_parameter("use_synced_input_velocity_filter").as_bool(),
         get_parameter("synced_input_velocity_filter_alpha").as_double(),
         get_parameter("synced_input_velocity_filter_beta").as_double(),
@@ -1271,20 +1423,23 @@ public:
         get_parameter("shutdown_action").as_string());
       RCLCPP_INFO(
         get_logger(),
-        "Using direct RB10 API backend (%s, state source: %s)",
+        "Using direct RB10 API backend (%s, state source: %s, command_mode=%s)",
         get_parameter("robot_ip").as_string().c_str(),
-        get_parameter("real_joint_state_source").as_string().c_str());
+        get_parameter("real_joint_state_source").as_string().c_str(),
+        command_mode_to_string(command_mode_));
     } else if (backend_mode == "joint_command_topics") {
       backend_ = std::make_unique<JointCommandTopicsBackend>(
         this,
         state_.q,
         get_parameter("joint_state_topic").as_string(),
-        get_parameter("position_command_topic").as_string());
+        get_parameter("position_command_topic").as_string(),
+        command_mode_);
       RCLCPP_INFO(
         get_logger(),
-        "Using joint command topic backend (%s -> %s)",
+        "Using joint command topic backend (%s -> %s, command_mode=%s)",
         get_parameter("joint_state_topic").as_string().c_str(),
-        get_parameter("position_command_topic").as_string().c_str());
+        get_parameter("position_command_topic").as_string().c_str(),
+        command_mode_to_string(command_mode_));
     } else {
       backend_ = std::make_unique<SimulationBackend>(state_.q);
       RCLCPP_INFO(get_logger(), "Using simulation backend");
@@ -1435,6 +1590,112 @@ private:
     return std::nullopt;
   }
 
+  std::optional<std::pair<std::size_t, std::size_t>> wall_following_sector_for_control_point(
+    std::size_t control_point_index) const
+  {
+    const auto & modules = default_sector_wall_modules();
+    for (std::size_t module_index = 0; module_index < modules.size(); ++module_index) {
+      const auto & module = modules[module_index];
+      for (std::size_t sector = 0; sector < module.control_point_indices.size(); ++sector) {
+        if (module.control_point_indices[sector] == control_point_index) {
+          return std::make_pair(module_index, sector);
+        }
+      }
+    }
+    return std::nullopt;
+  }
+
+  void configure_wall_following_range_inputs()
+  {
+    const auto range_topics = get_parameter("wall_following_range_topics").as_string_array();
+    auto sensor_enabled = get_parameter("wall_following_sensor_enabled").as_bool_array();
+    if (range_topics.size() != RB10Model::sensor_control_points.size()) {
+      throw std::runtime_error(
+              "wall_following_range_topics must match RB10 sensor control point count");
+    }
+    if (sensor_enabled.empty()) {
+      sensor_enabled.assign(range_topics.size(), true);
+    }
+    if (sensor_enabled.size() != range_topics.size()) {
+      throw std::runtime_error(
+              "wall_following_sensor_enabled must be empty or match wall_following_range_topics");
+    }
+
+    wall_following_range_subs_.clear();
+    wall_following_range_subs_.reserve(range_topics.size());
+    for (std::size_t control_point_index = 0; control_point_index < range_topics.size();
+      ++control_point_index)
+    {
+      if (!sensor_enabled[control_point_index]) {
+        continue;
+      }
+      const auto mapping = wall_following_sector_for_control_point(control_point_index);
+      if (!mapping.has_value()) {
+        continue;
+      }
+      wall_following_range_subs_.push_back(create_subscription<sensor_msgs::msg::Range>(
+          range_topics[control_point_index],
+          10,
+          [this, module_index = mapping->first, sector = mapping->second](
+            const sensor_msgs::msg::Range::SharedPtr msg)
+          {
+            on_wall_following_range(module_index, sector, *msg);
+          }));
+    }
+  }
+
+  bool wall_following_range_is_usable(const sensor_msgs::msg::Range & msg) const
+  {
+    if (!std::isfinite(msg.range)) {
+      return false;
+    }
+    if (msg.range < 0.0) {
+      return false;
+    }
+    return msg.range < (msg.max_range - wall_following_valid_margin_);
+  }
+
+  double wall_following_effective_range_m(const sensor_msgs::msg::Range & msg) const
+  {
+    return std::max(msg.range * wall_following_range_scale_, wall_following_minimum_hold_distance_);
+  }
+
+  void on_wall_following_range(
+    std::size_t module_index,
+    std::size_t sector,
+    const sensor_msgs::msg::Range & msg)
+  {
+    std::vector<SectorProximityData> proximity;
+    wall_following_proximity_box_.get(proximity);
+    if (proximity.size() != default_sector_wall_modules().size()) {
+      proximity.assign(default_sector_wall_modules().size(), SectorProximityData{});
+    }
+    if (
+      module_index >= proximity.size() ||
+      sector >= kWallFollowingSectorCount)
+    {
+      return;
+    }
+
+    auto & module = proximity[module_index];
+    module.enabled = true;
+    double stamp_sec = rclcpp::Time(msg.header.stamp).seconds();
+    if (stamp_sec <= 0.0) {
+      stamp_sec = now().seconds();
+    }
+    module.stamp_sec = stamp_sec;
+    module.has_sigma[sector] = false;
+    module.sigmas[sector] = 0.0;
+    if (wall_following_range_is_usable(msg)) {
+      module.distances[sector] = wall_following_effective_range_m(msg);
+      module.valid[sector] = true;
+    } else {
+      module.distances[sector] = std::numeric_limits<double>::infinity();
+      module.valid[sector] = false;
+    }
+    wall_following_proximity_box_.set(proximity);
+  }
+
   EigenRmpConfig build_solver_config() const
   {
     EigenRmpConfig config;
@@ -1522,6 +1783,7 @@ private:
     config.wrist_axis_target.proximity_metric_boost_length_scale =
       get_parameter("wrist_axis_target_rmp_proximity_metric_boost_length_scale").as_double();
 
+    config.collision.policy = get_parameter("collision_policy").as_string();
     config.collision.margin = get_parameter("collision_rmp_margin").as_double();
     config.collision.damping_gain = get_parameter("collision_rmp_damping_gain").as_double();
     config.collision.damping_std_dev = get_parameter("collision_rmp_damping_std_dev").as_double();
@@ -1541,6 +1803,34 @@ private:
       get_parameter("collision_rmp_metric_exploder_std_dev").as_double();
     config.collision.metric_exploder_eps =
       get_parameter("collision_rmp_metric_exploder_eps").as_double();
+
+    config.wall_following_collision.d_safe = get_parameter("d_safe").as_double();
+    config.wall_following_collision.d_ref = get_parameter("d_ref").as_double();
+    config.wall_following_collision.d_on = get_parameter("d_on").as_double();
+    config.wall_following_collision.d_off = get_parameter("d_off").as_double();
+    config.wall_following_collision.kappa_sigma = get_parameter("kappa_sigma").as_double();
+    config.wall_following_collision.gamma_cbf = get_parameter("gamma_cbf").as_double();
+    config.wall_following_collision.k_dist = get_parameter("k_dist").as_double();
+    config.wall_following_collision.k_vel = get_parameter("k_vel").as_double();
+    config.wall_following_collision.k_safe_0 = get_parameter("k_safe_0").as_double();
+    config.wall_following_collision.k_safe_1 = get_parameter("k_safe_1").as_double();
+    config.wall_following_collision.v_t_max = get_parameter("v_t_max").as_double();
+    config.wall_following_collision.v_n_toward_max =
+      get_parameter("v_n_toward_max").as_double();
+    config.wall_following_collision.v_n_away_max =
+      get_parameter("v_n_away_max").as_double();
+    config.wall_following_collision.a_safe_max = get_parameter("a_safe_max").as_double();
+    config.wall_following_collision.m_t = get_parameter("m_t").as_double();
+    config.wall_following_collision.m_n = get_parameter("m_n").as_double();
+    config.wall_following_collision.m_max = get_parameter("m_max").as_double();
+    config.wall_following_collision.direction_lock_time =
+      get_parameter("direction_lock_time").as_double();
+    config.wall_following_collision.normal_points_toward_obstacle =
+      get_parameter("wall_following_normal_points_toward_obstacle").as_bool();
+    config.wall_following_collision.nominal_velocity_dt =
+      get_parameter("wall_following_nominal_velocity_dt").as_double();
+    config.wall_following_collision.derivative_filter_alpha =
+      get_parameter("wall_following_derivative_filter_alpha").as_double();
 
     config.damping.accel_d_gain = get_parameter("damping_rmp_accel_d_gain").as_double();
     config.damping.metric_scalar = get_parameter("damping_rmp_metric_scalar").as_double();
@@ -2339,7 +2629,8 @@ private:
     const RobotState & state,
     const Eigen::Vector3d & goal,
     const Eigen::Quaterniond & goal_orientation,
-    const std::vector<ObstacleSphere> & obstacles) const
+    const std::vector<ObstacleSphere> & obstacles,
+    const std::vector<SectorProximityData> & sector_proximity) const
   {
     std::unordered_map<std::string, Eigen::Vector3d> vector_targets;
     vector_targets.emplace("goal", goal);
@@ -2361,7 +2652,13 @@ private:
           ExternalRmpFeature{buffer.metric_sqrt, buffer.acceleration});
       }
     }
-    const auto solution = solver_->solve(state.q, state.qd, vector_targets, obstacles, external_rmps);
+    const auto solution = solver_->solve(
+      state.q,
+      state.qd,
+      vector_targets,
+      obstacles,
+      sector_proximity,
+      external_rmps);
     JointVector qdd = solution.qdd;
     for (int index = 0; index < qdd.size(); ++index) {
       qdd[index] = std::clamp(qdd[index], -max_joint_accel_, max_joint_accel_);
@@ -2391,6 +2688,21 @@ private:
     }
 
     return command_state;
+  }
+
+  void send_velocity_hold_command(const RobotState & measured_state)
+  {
+    if (command_mode_ != CommandMode::kVelocity || !backend_) {
+      return;
+    }
+
+    RobotState hold_state = measured_state;
+    hold_state.qd.setZero();
+    backend_->apply_command(hold_state, RB10Model::joint_names);
+    publish_position_command(hold_state);
+    publish_direct_command(hold_state);
+    virtual_velocity_state_ = hold_state;
+    virtual_velocity_state_initialized_ = true;
   }
 
   void reset_controller_velocity_estimator()
@@ -2544,6 +2856,55 @@ private:
     double dt) const
   {
     bool clamped = false;
+    if (command_mode_ == CommandMode::kVelocity) {
+      const double safe_dt = std::max(dt, 1e-6);
+      for (int index = 0; index < command_state.q.size(); ++index) {
+        double limited_velocity = std::clamp(
+          command_state.qd[index],
+          -command_guard_max_velocity_rad_s_,
+          command_guard_max_velocity_rad_s_);
+        double guarded_lower = RB10Model::joint_lower_limits[index];
+        double guarded_upper = RB10Model::joint_upper_limits[index];
+
+        if (predictive_joint_limit_guard_) {
+          const double raw_lower = RB10Model::joint_lower_limits[index];
+          const double raw_upper = RB10Model::joint_upper_limits[index];
+          const double max_buffer = std::max(0.0, 0.45 * (raw_upper - raw_lower));
+          const double buffer = std::min(joint_limit_buffers_[static_cast<std::size_t>(index)], max_buffer);
+          guarded_lower = raw_lower + buffer;
+          guarded_upper = raw_upper - buffer;
+          const double measured_q = measured_state.q[index];
+
+          if (measured_q < guarded_lower) {
+            limited_velocity = std::max(limited_velocity, 0.0);
+          } else if (measured_q > guarded_upper) {
+            limited_velocity = std::min(limited_velocity, 0.0);
+          } else {
+            const double lower_velocity = (guarded_lower - measured_q) / safe_dt;
+            const double upper_velocity = (guarded_upper - measured_q) / safe_dt;
+            limited_velocity = std::clamp(limited_velocity, lower_velocity, upper_velocity);
+          }
+        } else if (
+          (measured_state.q[index] <= RB10Model::joint_lower_limits[index] + 0.1 &&
+          limited_velocity < 0.0) ||
+          (measured_state.q[index] >= RB10Model::joint_upper_limits[index] - 0.1 &&
+          limited_velocity > 0.0))
+        {
+          limited_velocity = 0.0;
+        }
+        if (std::abs(limited_velocity - command_state.qd[index]) > 1e-9) {
+          clamped = true;
+        }
+        command_state.qd[index] = limited_velocity;
+        command_state.q[index] = measured_state.q[index] + command_state.qd[index] * dt;
+        if (predictive_joint_limit_guard_) {
+          command_state.q[index] = std::clamp(command_state.q[index], guarded_lower, guarded_upper);
+        }
+      }
+      command_state.q = RB10Model::clamp_positions(command_state.q);
+      return clamped;
+    }
+
     const double max_step_rad =
       std::max(command_guard_max_step_rad_, command_guard_max_velocity_rad_s_ * dt);
 
@@ -2620,6 +2981,7 @@ private:
         GoalTarget goal_target;
         goal_target_box_.get(goal_target);
         publish_target_metric(measured_state, goal_target.position);
+        send_velocity_hold_command(measured_state);
         RCLCPP_INFO_THROTTLE(
           get_logger(),
           *get_clock(),
@@ -2644,6 +3006,7 @@ private:
         GoalTarget goal_target;
         goal_target_box_.get(goal_target);
         publish_target_metric(measured_state, goal_target.position);
+        send_velocity_hold_command(measured_state);
         RCLCPP_INFO_THROTTLE(
           get_logger(),
           *get_clock(),
@@ -2701,16 +3064,23 @@ private:
       Eigen::Vector3d goal;
       Eigen::Quaterniond goal_orientation;
       std::vector<ObstacleSphere> obstacles;
+      std::vector<SectorProximityData> sector_proximity;
       GoalTarget goal_target;
       goal_target_box_.get(goal_target);
       goal = goal_target.position;
       goal_orientation = goal_target.orientation;
       obstacles_box_.get(obstacles);
+      wall_following_proximity_box_.get(sector_proximity);
 
       JointVector qdd = JointVector::Zero();
       last_min_z_safety_triggered_.store(false);
       try {
-        qdd = compute_acceleration(control_state, goal, goal_orientation, obstacles);
+        qdd = compute_acceleration(
+          control_state,
+          goal,
+          goal_orientation,
+          obstacles,
+          sector_proximity);
       } catch (const std::exception & error) {
         RCLCPP_ERROR_THROTTLE(
           get_logger(),
@@ -2756,6 +3126,8 @@ private:
           get_logger(),
           *get_clock(),
           1000,
+          command_mode_ == CommandMode::kVelocity ?
+          "Command guard limited the joint velocity command to avoid triggering robot safety." :
           "Command guard limited the per-cycle joint step/velocity to avoid triggering robot safety.");
       }
 
@@ -2769,6 +3141,7 @@ private:
       publish_rmp_ee_pose(*command_context);
       publish_target_metric(control_state, goal);
       publish_target_q(command_state);
+      publish_position_command(command_state);
       backend_->apply_command(command_state, RB10Model::joint_names);
       publish_direct_command(command_state);
       virtual_velocity_state_ = command_state;
@@ -2809,12 +3182,29 @@ private:
     }
 
     std_msgs::msg::Float64MultiArray command;
-    command.data.assign(command_state.q.data(), command_state.q.data() + command_state.q.size());
+    const JointVector & command_vector =
+      command_mode_ == CommandMode::kVelocity ? command_state.qd : command_state.q;
+    command.data.assign(command_vector.data(), command_vector.data() + command_vector.size());
     if (rt_direct_command_pub_) {
       rt_direct_command_pub_->tryPublish(command);
       return;
     }
     direct_command_pub_->publish(command);
+  }
+
+  void publish_position_command(const RobotState & command_state)
+  {
+    if (!position_command_pub_) {
+      return;
+    }
+
+    std_msgs::msg::Float64MultiArray command;
+    command.data.assign(command_state.q.data(), command_state.q.data() + command_state.q.size());
+    if (rt_position_command_pub_) {
+      rt_position_command_pub_->tryPublish(command);
+      return;
+    }
+    position_command_pub_->publish(command);
   }
 
   void publish_target_q(const RobotState & command_state)
@@ -3034,12 +3424,14 @@ private:
   bool last_safe_command_state_initialized_{false};
   bool controller_velocity_estimator_initialized_{false};
   Eigen::Vector3d body_goal_;
+  CommandMode command_mode_{CommandMode::kPosition};
   TargetRmpParams target_metric_params_;
   CollisionRmpParams collision_metric_params_;
   realtime_tools::RealtimeBox<GoalTarget> goal_target_box_;
   realtime_tools::RealtimeBox<std::vector<ObstacleSphere>> obstacles_box_;
   realtime_tools::RealtimeBox<std::vector<std::optional<ObstacleSphere>>>
   proximity_sensor_obstacles_box_;
+  realtime_tools::RealtimeBox<std::vector<SectorProximityData>> wall_following_proximity_box_;
   realtime_tools::RealtimeBox<TcpAccelerationSample> tcp_accel_visualization_box_;
   std::vector<BodyObstacle> body_obstacles_visual_;
   std::atomic<bool> last_min_z_safety_triggered_{false};
@@ -3076,16 +3468,22 @@ private:
   double max_joint_accel_{20.0};
   double command_guard_max_step_rad_{0.00436332313};
   double command_guard_max_velocity_rad_s_{0.436332313};
+  bool predictive_joint_limit_guard_{true};
+  std::array<double, 6> joint_limit_buffers_{0.01, 0.01, 0.01, 0.01, 0.01, 0.01};
   double repulsion_metric_marker_min_norm_{0.01};
   double repulsion_metric_marker_dot_diameter_{0.04};
   double tcp_accel_marker_max_length_{0.15};
   double tcp_accel_marker_norm_for_max_length_{2.0};
   double tcp_accel_marker_min_norm_{0.001};
+  double wall_following_range_scale_{0.001};
+  double wall_following_minimum_hold_distance_{0.05};
+  double wall_following_valid_margin_{1e-3};
   int rmp_active_flag_value_{1};
   std::atomic<bool> rmp_active_{true};
 
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr direct_command_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr position_command_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr target_q_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr target_metric_pub_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr goal_marker_pub_;
@@ -3099,6 +3497,7 @@ private:
   std::unique_ptr<tf2_ros::TransformBroadcaster> goal_tf_broadcaster_;
   std::shared_ptr<JointStateRtPublisher> rt_joint_state_pub_;
   std::shared_ptr<Float64ArrayRtPublisher> rt_direct_command_pub_;
+  std::shared_ptr<Float64ArrayRtPublisher> rt_position_command_pub_;
   std::shared_ptr<Float64ArrayRtPublisher> rt_target_q_pub_;
   std::shared_ptr<Float64ArrayRtPublisher> rt_target_metric_pub_;
   std::shared_ptr<PoseRtPublisher> rt_rmp_eef_pose_pub_;
@@ -3106,6 +3505,8 @@ private:
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_sub_;
   rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr rmp_flag_sub_;
   rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr obstacle_sub_;
+  std::vector<rclcpp::Subscription<sensor_msgs::msg::Range>::SharedPtr>
+  wall_following_range_subs_;
   std::vector<rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr> external_metric_subs_;
   std::vector<rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr> external_accel_subs_;
   rclcpp::TimerBase::SharedPtr visualization_timer_;

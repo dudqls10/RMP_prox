@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -35,6 +36,34 @@ struct ExternalRmpFeature
 {
   Eigen::MatrixXd metric_sqrt;
   Eigen::VectorXd acceleration;
+};
+
+enum class WallFollowingSector : std::size_t
+{
+  East = 0,
+  West = 1,
+  North = 2,
+  South = 3
+};
+
+constexpr std::size_t kWallFollowingSectorCount = 4;
+
+struct SectorProximityData
+{
+  std::array<double, kWallFollowingSectorCount> distances{};
+  std::array<double, kWallFollowingSectorCount> sigmas{};
+  std::array<bool, kWallFollowingSectorCount> has_sigma{};
+  std::array<bool, kWallFollowingSectorCount> valid{};
+  double stamp_sec{0.0};
+  bool enabled{false};
+
+  SectorProximityData()
+  {
+    distances.fill(std::numeric_limits<double>::infinity());
+    sigmas.fill(0.0);
+    has_sigma.fill(false);
+    valid.fill(false);
+  }
 };
 
 struct CSpaceTargetParams
@@ -91,6 +120,7 @@ struct AxisTargetParams
 
 struct CollisionRmpParams
 {
+  std::string policy{"repulsive"};
   double margin{0.0};
   double damping_gain{50.0};
   double damping_std_dev{0.04};
@@ -103,6 +133,96 @@ struct CollisionRmpParams
   double metric_exploder_std_dev{0.02};
   double metric_exploder_eps{0.001};
 };
+
+struct WallFollowingCollisionParams
+{
+  double d_safe{0.10};
+  double d_ref{0.15};
+  double d_on{0.22};
+  double d_off{0.30};
+  double kappa_sigma{1.0};
+  double gamma_cbf{2.0};
+  double k_dist{1.0};
+  double k_vel{4.0};
+  double k_safe_0{8.0};
+  double k_safe_1{4.0};
+  double v_t_max{0.10};
+  double v_n_toward_max{0.03};
+  double v_n_away_max{0.10};
+  double a_safe_max{0.50};
+  double m_t{1.0};
+  double m_n{5.0};
+  double m_max{50.0};
+  double direction_lock_time{1.0};
+  double nominal_velocity_dt{0.01};
+  double derivative_filter_alpha{0.35};
+  double near_zero_metric{1e-9};
+  bool normal_points_toward_obstacle{true};
+};
+
+struct SectorWallModuleSpec
+{
+  const char * name;
+  std::size_t parent_link;
+  std::array<std::size_t, kWallFollowingSectorCount> control_point_indices;
+  std::array<Eigen::Vector3d, kWallFollowingSectorCount> local_normals;
+};
+
+inline Eigen::Vector3d normalized_or(
+  const Eigen::Vector3d & value,
+  const Eigen::Vector3d & fallback)
+{
+  const double norm = value.norm();
+  if (norm > 1e-9) {
+    return value / norm;
+  }
+  return fallback;
+}
+
+inline SectorWallModuleSpec make_sector_wall_module_spec(
+  const char * name,
+  std::size_t parent_link,
+  const std::array<std::size_t, kWallFollowingSectorCount> & indices)
+{
+  Eigen::Vector3d center = Eigen::Vector3d::Zero();
+  for (const auto index : indices) {
+    center += RB10Model::sensor_control_points[index].offset;
+  }
+  center /= static_cast<double>(indices.size());
+
+  SectorWallModuleSpec spec{
+    name,
+    parent_link,
+    indices,
+    {
+      normalized_or(
+        RB10Model::sensor_control_points[indices[0]].offset - center,
+        Eigen::Vector3d::UnitX()),
+      normalized_or(
+        RB10Model::sensor_control_points[indices[1]].offset - center,
+        -Eigen::Vector3d::UnitX()),
+      normalized_or(
+        RB10Model::sensor_control_points[indices[2]].offset - center,
+        Eigen::Vector3d::UnitY()),
+      normalized_or(
+        RB10Model::sensor_control_points[indices[3]].offset - center,
+        -Eigen::Vector3d::UnitY())
+    }
+  };
+  return spec;
+}
+
+inline const std::array<SectorWallModuleSpec, 5> & default_sector_wall_modules()
+{
+  static const std::array<SectorWallModuleSpec, 5> modules{{
+    make_sector_wall_module_spec("tof6_1", RB10Model::LINK5, {{2, 0, 3, 1}}),
+    make_sector_wall_module_spec("tof_link3_5_high", RB10Model::LINK3_5, {{5, 7, 6, 4}}),
+    make_sector_wall_module_spec("tof3_1", RB10Model::LINK3_5, {{11, 9, 10, 8}}),
+    make_sector_wall_module_spec("tof2_1", RB10Model::LINK2, {{12, 14, 15, 13}}),
+    make_sector_wall_module_spec("tof2", RB10Model::LINK2, {{16, 18, 19, 17}})
+  }};
+  return modules;
+}
 
 struct DampingRmpParams
 {
@@ -251,6 +371,7 @@ struct EigenRmpConfig
   AxisTargetParams axis_target{};
   AxisTargetParams wrist_axis_target{};
   CollisionRmpParams collision{};
+  WallFollowingCollisionParams wall_following_collision{};
   DampingRmpParams damping{};
   std::vector<BodyObstacle> body_obstacles;
   std::vector<RmpNodeConfig> graph_nodes{default_rmp_graph_nodes()};

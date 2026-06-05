@@ -22,6 +22,15 @@ def _as_bool(value):
     return bool(value)
 
 
+def _normalize_command_mode(value):
+    normalized = str(value).strip().lower()
+    if normalized in {'position', 'servo_j', 'servoj'}:
+        return 'position'
+    if normalized in {'velocity', 'speed_j', 'speedj'}:
+        return 'velocity'
+    raise ValueError('command_mode must be one of: position, velocity, servo_j, speed_j')
+
+
 
 class RB10APIBridge(Node):
     def __init__(self):
@@ -29,6 +38,7 @@ class RB10APIBridge(Node):
 
         self.declare_parameter('robot_ip', '192.168.111.50')
         self.declare_parameter('simulation_mode', True)
+        self.declare_parameter('command_mode', 'velocity')
         self.declare_parameter('command_topic', '/position_controllers/commands')
         self.declare_parameter('joint_state_topic', '/joint_states')
         self.declare_parameter('real_joint_state_source', 'measured')
@@ -37,6 +47,10 @@ class RB10APIBridge(Node):
         self.declare_parameter('servo_t2', 0.1)
         self.declare_parameter('servo_gain', 0.02)
         self.declare_parameter('servo_alpha', 0.2)
+        self.declare_parameter('speedj_t1', 0.02)
+        self.declare_parameter('speedj_t2', 0.2)
+        self.declare_parameter('speedj_gain', 0.05)
+        self.declare_parameter('speedj_alpha', 0.1)
         self.declare_parameter('max_command_step_deg', 0.25)
         self.declare_parameter('max_command_velocity_deg_s', 25.0)
         self.declare_parameter('large_command_jump_warn_deg', 2.0)
@@ -45,6 +59,7 @@ class RB10APIBridge(Node):
 
         self.robot_ip = self.get_parameter('robot_ip').value
         self.simulation_mode = _as_bool(self.get_parameter('simulation_mode').value)
+        self.command_mode = _normalize_command_mode(self.get_parameter('command_mode').value)
         self.command_topic = self.get_parameter('command_topic').value
         self.joint_state_topic = self.get_parameter('joint_state_topic').value
         self.real_joint_state_source = str(
@@ -55,6 +70,10 @@ class RB10APIBridge(Node):
         self.servo_t2 = float(self.get_parameter('servo_t2').value)
         self.servo_gain = float(self.get_parameter('servo_gain').value)
         self.servo_alpha = float(self.get_parameter('servo_alpha').value)
+        self.speedj_t1 = float(self.get_parameter('speedj_t1').value)
+        self.speedj_t2 = float(self.get_parameter('speedj_t2').value)
+        self.speedj_gain = float(self.get_parameter('speedj_gain').value)
+        self.speedj_alpha = float(self.get_parameter('speedj_alpha').value)
         self.max_command_step_deg = max(float(self.get_parameter('max_command_step_deg').value), 0.01)
         self.max_command_velocity_deg_s = max(
             float(self.get_parameter('max_command_velocity_deg_s').value),
@@ -89,7 +108,7 @@ class RB10APIBridge(Node):
         mode_label = 'SIMULATION' if self.simulation_mode else 'REAL'
         self.get_logger().info(
             f'RB10 api bridge connected to {self.robot_ip} in {mode_label} mode '
-            f'({self.command_topic} -> {self.joint_state_topic})'
+            f'({self.command_topic} -> {self.joint_state_topic}, command_mode={self.command_mode})'
         )
 
     def _load_api(self):
@@ -174,6 +193,33 @@ class RB10APIBridge(Node):
                     self.get_logger().warn('RB10 sockets not connected')
                     self._last_conn_warn = time.time()
                 return
+            if self.command_mode == 'velocity':
+                desired_velocity_deg_s = [math.degrees(float(j)) for j in msg.data[:6]]
+                safe_velocity_deg_s = []
+                clamped = False
+                for desired_deg_s in desired_velocity_deg_s:
+                    limited_deg_s = max(
+                        -self.max_command_velocity_deg_s,
+                        min(self.max_command_velocity_deg_s, desired_deg_s),
+                    )
+                    if abs(limited_deg_s - desired_deg_s) > 1e-9:
+                        clamped = True
+                    safe_velocity_deg_s.append(limited_deg_s)
+
+                if clamped and time.time() - self._last_guard_warn > 1.0:
+                    self.get_logger().warn(
+                        'SpeedJ command guard limited joint velocity to '
+                        f'{self.max_command_velocity_deg_s:.3f} deg/s'
+                    )
+                    self._last_guard_warn = time.time()
+
+                cmd = (
+                    'move_speed_j(jnt[' + ','.join(f'{j:.3f}' for j in safe_velocity_deg_s) + '],' +
+                    f'{self.speedj_t1},{self.speedj_t2},{self.speedj_gain},{self.speedj_alpha})'
+                )
+                self.api['SendCOMMAND'](cmd, self.api['CMD_TYPE'].MOVE)
+                return
+
             current_joints_deg = self._get_current_joint_source()
             if not current_joints_deg or len(current_joints_deg) < 6:
                 return
@@ -219,6 +265,10 @@ class RB10APIBridge(Node):
             return
         self._stop_requested = True
 
+        if self.command_mode == 'velocity':
+            self._send_zero_velocity_command()
+            time.sleep(0.02)
+
         action = self.shutdown_action if self.shutdown_action in {'halt', 'pause'} else 'halt'
         first_name = 'MotionHalt' if action == 'halt' else 'MotionPause'
         second_name = 'MotionPause' if action == 'halt' else 'MotionHalt'
@@ -248,6 +298,17 @@ class RB10APIBridge(Node):
             self.get_logger().warn(
                 f'Failed to stop RB10 motion during shutdown: {first_name}={first_error}, {second_name}={exc}'
             )
+
+    def _send_zero_velocity_command(self):
+        try:
+            cmd = (
+                'move_speed_j(jnt[0.000,0.000,0.000,0.000,0.000,0.000],' +
+                f'{self.speedj_t1},{self.speedj_t2},{self.speedj_gain},{self.speedj_alpha})'
+            )
+            self.api['SendCOMMAND'](cmd, self.api['CMD_TYPE'].MOVE)
+            self.get_logger().info('Sent zero move_speed_j to RB10')
+        except Exception as exc:
+            self.get_logger().warn(f'Failed to send zero move_speed_j: {exc}')
 
     def _clear_motion_buffers(self):
         for clear_name in ('MoveITPL_Clear', 'MovePB_Clear', 'MoveJB_Clear'):
