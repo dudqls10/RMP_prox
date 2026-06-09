@@ -48,7 +48,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /robot_description
+        Value: /rb10/robot_description
       Enabled: true
       Links:
         All Links Enabled: true
@@ -244,6 +244,20 @@ Visualization Manager:
         Value: /goal_marker
       Value: true
     - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: RMPGoalSequence
+      Namespaces:
+        rmp_goal_sequence: true
+        rmp_goal_sequence_line: true
+        rmp_goal_sequence_points: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /rmp_goal_sequence_marker
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
       Enabled: false
       Name: ControlPoints
       Namespaces:
@@ -266,6 +280,18 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /obstacles
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: ProximitySurfacePatches
+      Namespaces:
+        proximity_surface_patches: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /proximity_surface_patches
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true

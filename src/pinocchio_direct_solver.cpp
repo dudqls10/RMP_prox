@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 #include "rb10_rmpflow_rviz/casadi_task_graph.hpp"
@@ -23,6 +24,103 @@ struct SolverImpl
 const SolverImpl & get_impl(const std::shared_ptr<const void> & state)
 {
   return *std::static_pointer_cast<const SolverImpl>(state);
+}
+
+Eigen::Vector3d normalized_or_zero(const Eigen::Vector3d & value)
+{
+  const double norm = value.norm();
+  if (norm <= 1e-9 || !std::isfinite(norm)) {
+    return Eigen::Vector3d::Zero();
+  }
+  return value / norm;
+}
+
+double predicted_clearance_along(
+  const Eigen::Vector3d & position,
+  double point_radius,
+  const Eigen::Vector3d & direction,
+  const std::vector<ObstacleSphere> & obstacles,
+  const CollisionRmpParams & params)
+{
+  const Eigen::Vector3d predicted =
+    position + std::max(params.candidate_lookahead, 0.0) * direction;
+  double min_clearance = std::numeric_limits<double>::infinity();
+  for (const auto & obstacle : obstacles) {
+    if (obstacle.radius <= 0.0) {
+      continue;
+    }
+    const double clearance =
+      (predicted - obstacle.center).norm() -
+      (point_radius + obstacle.radius) -
+      params.margin;
+    min_clearance = std::min(min_clearance, clearance);
+  }
+  if (!std::isfinite(min_clearance)) {
+    return params.metric_modulation_radius;
+  }
+  return min_clearance;
+}
+
+Eigen::Vector3d choose_custom_avoidance_direction(
+  const Eigen::Vector3d & position,
+  double point_radius,
+  const Eigen::Vector3d & velocity,
+  const Eigen::Vector3d & goal,
+  const Eigen::Vector3d & away_normal,
+  const std::vector<ObstacleSphere> & obstacles,
+  const CollisionRmpParams & params)
+{
+  const Eigen::Vector3d goal_direction = normalized_or_zero(goal - position);
+  const Eigen::Vector3d velocity_direction = normalized_or_zero(velocity);
+  const std::array<Eigen::Vector3d, 8> seeds{{
+    goal_direction,
+    velocity_direction,
+    Eigen::Vector3d::UnitZ(),
+    -Eigen::Vector3d::UnitZ(),
+    Eigen::Vector3d::UnitX(),
+    -Eigen::Vector3d::UnitX(),
+    Eigen::Vector3d::UnitY(),
+    -Eigen::Vector3d::UnitY()
+  }};
+
+  Eigen::Vector3d best_direction = Eigen::Vector3d::Zero();
+  double best_score = -std::numeric_limits<double>::infinity();
+  const double influence_distance = std::max(params.metric_modulation_radius, 1e-9);
+  for (const auto & seed : seeds) {
+    if (seed.squaredNorm() <= 1e-12) {
+      continue;
+    }
+    Eigen::Vector3d candidate = seed - away_normal * seed.dot(away_normal);
+    candidate = normalized_or_zero(candidate);
+    if (candidate.squaredNorm() <= 1e-12) {
+      continue;
+    }
+
+    const double goal_alignment =
+      goal_direction.squaredNorm() > 1e-12 ? candidate.dot(goal_direction) : 0.0;
+    const double velocity_alignment =
+      velocity_direction.squaredNorm() > 1e-12 ? candidate.dot(velocity_direction) : 0.0;
+    const double predicted_clearance =
+      predicted_clearance_along(position, point_radius, candidate, obstacles, params);
+    const double clearance_score =
+      std::clamp(predicted_clearance / influence_distance, 0.0, 1.0);
+    const double toward_penalty = std::max(0.0, -candidate.dot(away_normal));
+    const double score =
+      params.goal_weight * goal_alignment +
+      params.clearance_weight * clearance_score +
+      params.velocity_weight * velocity_alignment -
+      params.toward_penalty_weight * toward_penalty;
+
+    if (score > best_score) {
+      best_score = score;
+      best_direction = candidate;
+    }
+  }
+
+  if (best_direction.squaredNorm() > 1e-12) {
+    return best_direction;
+  }
+  return away_normal;
 }
 
 std::vector<std::size_t> build_topological_order(const EigenRmpConfig & config)
@@ -206,10 +304,10 @@ PinocchioDirectRmpSolver::PinocchioDirectRmpSolver(
 {
   if (
     config_.collision.policy != "repulsive" &&
-    config_.collision.policy != "wall_following")
+    config_.collision.policy != "custom_avoidance")
   {
     throw std::runtime_error(
-            "collision_policy must be one of: repulsive, wall_following");
+            "collision_policy must be one of: repulsive, custom_avoidance");
   }
   auto impl = std::make_shared<SolverImpl>();
   impl->topo_indices = build_topological_order(config_);
@@ -235,7 +333,6 @@ RmpSolveResult PinocchioDirectRmpSolver::solve(
   const JointVector & qd,
   const std::unordered_map<std::string, Eigen::Vector3d> & vector_targets,
   const std::vector<ObstacleSphere> & obstacles,
-  const std::vector<SectorProximityData> & sector_proximity,
   const std::unordered_map<std::string, ExternalRmpFeature> & external_rmps) const
 {
   const auto context = model_->forward_context(q, qd);
@@ -258,8 +355,6 @@ RmpSolveResult PinocchioDirectRmpSolver::solve(
       Eigen::VectorXd::Zero(6)
     });
 
-  const std::vector<ObstacleSphere> empty_obstacles;
-  const bool use_wall_following_collision = config_.collision.policy == "wall_following";
   for (const auto index : impl.topo_indices) {
     const auto & node = config_.graph_nodes[index];
 
@@ -267,53 +362,9 @@ RmpSolveResult PinocchioDirectRmpSolver::solve(
       node,
       q,
       context,
-      use_wall_following_collision ? empty_obstacles : obstacles,
+      obstacles,
       cache);
     cache[node.name] = geometry;
-  }
-
-  JointVector nominal_qd_without_collision = qd;
-  if (use_wall_following_collision) {
-    // Use a one-control-period velocity prediction from all non-collision RMPs
-    // as the module-local nominal goal motion for tangential projection.
-    Matrix6 nominal_metric = Matrix6::Zero();
-    JointVector nominal_force = JointVector::Zero();
-    for (const auto index : impl.topo_indices) {
-      const auto & node = config_.graph_nodes[index];
-      const auto geometry_it = cache.find(node.name);
-      if (geometry_it == cache.end()) {
-        continue;
-      }
-      if (node.leaf_rmp_type != "collision") {
-        accumulate_leaf_type(
-          node.leaf_rmp_type,
-          node,
-          geometry_it->second,
-          qd,
-          cache,
-          vector_targets,
-          external_rmps,
-          nominal_metric,
-          nominal_force);
-      }
-      if (node.handcrafted_leaf_rmp_type != "collision") {
-        accumulate_leaf_type(
-          node.handcrafted_leaf_rmp_type,
-          node,
-          geometry_it->second,
-          qd,
-          cache,
-          vector_targets,
-          external_rmps,
-          nominal_metric,
-          nominal_force);
-      }
-    }
-    const JointVector nominal_qdd = use_rmp2 ?
-      resolve_root_rmp2(nominal_metric, nominal_force, config_.solve_offset) :
-      resolve_root_direct(nominal_metric, nominal_force, config_.solve_offset);
-    nominal_qd_without_collision =
-      qd + std::max(0.0, config_.wall_following_collision.nominal_velocity_dt) * nominal_qdd;
   }
 
   for (const auto index : impl.topo_indices) {
@@ -322,21 +373,24 @@ RmpSolveResult PinocchioDirectRmpSolver::solve(
     const auto accumulate_leaf = [&](const std::string & leaf_type) {
         if (
           leaf_type == "collision" &&
-          use_wall_following_collision)
+          config_.collision.policy == "custom_avoidance")
         {
           const std::string control_points_node =
             node.parents.empty() ? std::string("control_points") : node.parents.front();
           const auto control_points_it = cache.find(control_points_node);
           if (control_points_it == cache.end()) {
             throw std::runtime_error(
-                    "wall_following collision requires parent control point geometry");
+                    "custom_avoidance collision requires parent control point geometry");
           }
-          accumulate_wall_following_collision(
+          Eigen::Vector3d custom_goal = Eigen::Vector3d::Zero();
+          const auto goal_it = vector_targets.find("goal");
+          if (goal_it != vector_targets.end()) {
+            custom_goal = goal_it->second;
+          }
+          accumulate_custom_avoidance_collision(
             control_points_it->second,
-            context,
-            qd,
-            nominal_qd_without_collision,
-            sector_proximity,
+            custom_goal,
+            obstacles,
             metric,
             force);
           return;
@@ -374,7 +428,6 @@ std::vector<RmpSolveResult> PinocchioDirectRmpSolver::solve_batch(
         input.qd,
         input.vector_targets,
         input.obstacles,
-        input.sector_proximity,
         input.external_rmps));
   }
   return results;
@@ -698,6 +751,8 @@ PinocchioDirectRmpSolver::NodeGeometry PinocchioDirectRmpSolver::evaluate_native
     std::vector<double> velocities;
     std::vector<double> curvatures;
     std::vector<Eigen::RowVectorXd> jacobians;
+    const auto & collision_params = config_.collision.policy == "custom_avoidance" ?
+      config_.custom_avoidance : config_.collision;
     xs.reserve(static_cast<std::size_t>(
       num_control_points * (static_cast<int>(obstacles.size()) + (config_.body_obstacles.empty() ? 0 : 1))));
     velocities.reserve(xs.capacity());
@@ -728,7 +783,7 @@ PinocchioDirectRmpSolver::NodeGeometry PinocchioDirectRmpSolver::evaluate_native
         const Eigen::Vector3d delta = position - obstacle.center;
         const double center_distance = std::max(delta.norm(), 1e-9);
         const double signed_distance =
-          center_distance - (point_radius + obstacle.radius) - config_.collision.margin;
+          center_distance - (point_radius + obstacle.radius) - collision_params.margin;
         const double x = std::max(signed_distance, 0.0);
         const Eigen::RowVectorXd jacobian =
           (delta / center_distance).transpose() * point_jacobian;
@@ -773,7 +828,7 @@ PinocchioDirectRmpSolver::NodeGeometry PinocchioDirectRmpSolver::evaluate_native
           const Eigen::Vector3d delta = position - obstacle_center;
           const double center_distance = std::max(delta.norm(), 1e-9);
           const double signed_distance =
-            center_distance - (point_radius + obstacle.radius) - config_.collision.margin;
+            center_distance - (point_radius + obstacle.radius) - collision_params.margin;
           const double x = std::max(signed_distance, 0.0);
           const Eigen::RowVectorXd jacobian =
             (delta / center_distance).transpose() * point_jacobian;
@@ -815,7 +870,7 @@ PinocchioDirectRmpSolver::NodeGeometry PinocchioDirectRmpSolver::evaluate_native
           const Eigen::Vector3d delta = local_position - clamped;
           const double outside_distance = delta.norm();
           const double signed_distance =
-            outside_distance - point_radius - config_.collision.margin;
+            outside_distance - point_radius - collision_params.margin;
           const double x = std::max(signed_distance, 0.0);
           Eigen::Vector3d grad_local = Eigen::Vector3d::Zero();
           if (outside_distance > 1e-9) {
@@ -1412,93 +1467,96 @@ void PinocchioDirectRmpSolver::accumulate_collision(
   }
 }
 
-void PinocchioDirectRmpSolver::accumulate_wall_following_collision(
+void PinocchioDirectRmpSolver::accumulate_custom_avoidance_collision(
   const NodeGeometry & control_point_geometry,
-  const KinematicsContext & context,
-  const JointVector & qd,
-  const JointVector & nominal_qd_without_collision,
-  const std::vector<SectorProximityData> & sector_proximity,
+  const Eigen::Vector3d & goal,
+  const std::vector<ObstacleSphere> & obstacles,
   Matrix6 & metric,
   JointVector & force) const
 {
-  (void)qd;
-  if (sector_proximity.empty()) {
+  if (obstacles.empty()) {
     return;
   }
 
+  const auto & params = config_.custom_avoidance;
   const bool use_natural_rmp = uses_rmp2_solve() && uses_natural_rmp();
-  const auto & modules = default_sector_wall_modules();
-  if (wall_following_states_.size() != modules.size()) {
-    wall_following_states_.assign(modules.size(), SectorWallFollowingCollisionRMP::State{});
-  }
+  const double influence_distance = std::max(params.metric_modulation_radius, 1e-9);
+  const int control_points = static_cast<int>(control_point_geometry.x.size() / 3);
+  for (int point_index = 0; point_index < control_points; ++point_index) {
+    if (point_index >= static_cast<int>(RB10Model::sensor_control_points.size())) {
+      break;
+    }
 
-  const SectorWallFollowingCollisionRMP wall_following(config_.wall_following_collision);
-  for (std::size_t module_index = 0; module_index < modules.size(); ++module_index) {
-    if (module_index >= sector_proximity.size() || !sector_proximity[module_index].enabled) {
-      wall_following_states_[module_index].active = false;
+    const Eigen::Index offset = static_cast<Eigen::Index>(3 * point_index);
+    if (
+      offset + 2 >= control_point_geometry.x.size() ||
+      offset + 2 >= control_point_geometry.velocity.size() ||
+      offset + 2 >= control_point_geometry.curvature.size() ||
+      control_point_geometry.jacobian.rows() <= offset + 2)
+    {
       continue;
     }
 
-    const auto & module = modules[module_index];
-    Eigen::Vector3d position = Eigen::Vector3d::Zero();
-    Eigen::Matrix<double, 3, 6> jacobian = Eigen::Matrix<double, 3, 6>::Zero();
-    Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
-    Eigen::Vector3d curvature = Eigen::Vector3d::Zero();
-    int valid_points = 0;
-    for (const auto point_index : module.control_point_indices) {
-      const Eigen::Index offset = static_cast<Eigen::Index>(3 * point_index);
-      if (
-        offset + 2 >= control_point_geometry.x.size() ||
-        offset + 2 >= control_point_geometry.velocity.size() ||
-        offset + 2 >= control_point_geometry.curvature.size() ||
-        control_point_geometry.jacobian.rows() <= offset + 2)
-      {
+    const Eigen::Vector3d position = control_point_geometry.x.segment<3>(offset);
+    const Eigen::Matrix<double, 3, 6> jacobian =
+      control_point_geometry.jacobian.block<3, 6>(offset, 0);
+    const Eigen::Vector3d velocity = control_point_geometry.velocity.segment<3>(offset);
+    const Eigen::Vector3d curvature = control_point_geometry.curvature.segment<3>(offset);
+    const double point_radius =
+      RB10Model::sensor_control_points[static_cast<std::size_t>(point_index)].radius;
+
+    for (const auto & obstacle : obstacles) {
+      const Eigen::Vector3d delta = position - obstacle.center;
+      const double center_distance = std::max(delta.norm(), 1e-9);
+      const double clearance =
+        center_distance - (point_radius + obstacle.radius) - params.margin;
+      if (clearance >= influence_distance) {
         continue;
       }
-      position += control_point_geometry.x.segment<3>(offset);
-      jacobian += control_point_geometry.jacobian.block<3, 6>(offset, 0);
-      velocity += control_point_geometry.velocity.segment<3>(offset);
-      curvature += control_point_geometry.curvature.segment<3>(offset);
-      ++valid_points;
-    }
-    if (valid_points == 0) {
-      continue;
-    }
 
-    const double inv_valid_points = 1.0 / static_cast<double>(valid_points);
-    position *= inv_valid_points;
-    (void)position;
-    jacobian *= inv_valid_points;
-    velocity *= inv_valid_points;
-    curvature *= inv_valid_points;
+      const Eigen::Vector3d n = delta / center_distance;
+      const double clipped_clearance = std::clamp(clearance, 0.0, influence_distance);
+      const double ratio = clipped_clearance / influence_distance;
+      const double alpha = 1.0 - (ratio * ratio * (3.0 - 2.0 * ratio));
 
-    SectorWallFollowingCollisionRMP::Input input;
-    const auto & proximity = sector_proximity[module_index];
-    input.distances = proximity.distances;
-    input.sigmas = proximity.sigmas;
-    input.has_sigma = proximity.has_sigma;
-    input.valid = proximity.valid;
-    input.time_sec = proximity.stamp_sec;
-    input.xdot = velocity;
-    input.v_goal = jacobian * nominal_qd_without_collision;
-    for (std::size_t sector = 0; sector < kWallFollowingSectorCount; ++sector) {
-      input.normals_world[sector] =
-        context.link_rotations[module.parent_link] * module.local_normals[sector];
-    }
+      const Eigen::Vector3d escape_direction = choose_custom_avoidance_direction(
+        position,
+        point_radius,
+        velocity,
+        goal,
+        n,
+        obstacles,
+        params);
 
-    const auto leaf =
-      wall_following.evaluate(input, wall_following_states_[module_index]);
-    if (leaf.metric.cwiseAbs().maxCoeff() <= 0.0 && leaf.acceleration.norm() <= 0.0) {
-      continue;
+      Eigen::Vector3d acceleration =
+        params.up_gain * (params.up_speed * escape_direction - velocity);
+      const double approaching_speed = std::max(0.0, -n.dot(velocity));
+      if (clearance < params.safe_distance) {
+        acceleration +=
+          params.safe_gain * (params.safe_distance - clearance) * n +
+          params.damping_gain * approaching_speed * n;
+      }
+
+      const double accel_norm = acceleration.norm();
+      if (accel_norm > params.max_accel && accel_norm > 1e-9) {
+        acceleration *= params.max_accel / accel_norm;
+      }
+      acceleration *= alpha;
+
+      const double x = std::max(clearance, 0.0);
+      const double metric_scalar =
+        alpha * params.metric_scalar /
+        (x / params.metric_exploder_std_dev + params.metric_exploder_eps);
+
+      accumulate_vector_leaf(
+        use_natural_rmp,
+        jacobian,
+        metric_scalar * Eigen::Matrix3d::Identity(),
+        acceleration,
+        curvature,
+        metric,
+        force);
     }
-    accumulate_vector_leaf(
-      use_natural_rmp,
-      jacobian,
-      leaf.metric,
-      leaf.acceleration,
-      curvature,
-      metric,
-      force);
   }
 }
 

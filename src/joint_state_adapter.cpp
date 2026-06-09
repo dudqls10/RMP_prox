@@ -71,10 +71,20 @@ private:
       return;
     }
 
-    if (last_mapping_source_ != mapping_source) {
+    if (last_mapping_source_.empty()) {
       RCLCPP_INFO(
         get_logger(),
         "joint_state_adapter using %s ordering for %s",
+        mapping_source.c_str(),
+        input_topic_.c_str());
+      last_mapping_source_ = mapping_source;
+    } else if (last_mapping_source_ != mapping_source) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(),
+        *get_clock(),
+        5000,
+        "joint_state_adapter input ordering changed from %s to %s for %s; check for multiple /joint_states publishers or mixed joint name formats",
+        last_mapping_source_.c_str(),
         mapping_source.c_str(),
         input_topic_.c_str());
       last_mapping_source_ = mapping_source;

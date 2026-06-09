@@ -39,6 +39,11 @@ def generate_launch_description():
     use_interactive_goal = LaunchConfiguration("use_interactive_goal")
     use_obstacles = LaunchConfiguration("use_obstacles")
     use_proximity_bridge = LaunchConfiguration("use_proximity_bridge")
+    proximity_surface_visualization = LaunchConfiguration("proximity_surface_visualization")
+    surface_patch_enabled = LaunchConfiguration("surface_patch_enabled")
+    surface_patch_collision_memory_enabled = LaunchConfiguration(
+        "surface_patch_collision_memory_enabled"
+    )
     record_data = LaunchConfiguration("record_data")
     auto_start_recording = LaunchConfiguration("auto_start_recording")
     recording_rate = LaunchConfiguration("recording_rate")
@@ -180,6 +185,9 @@ def generate_launch_description():
             "robot_description": robot_description,
             "publish_frequency": 50.0,
         }],
+        remappings=[
+            ("robot_description", "/rb10/robot_description"),
+        ],
     )
 
     rmpflow_controller = Node(
@@ -224,8 +232,41 @@ def generate_launch_description():
         executable="proximity_obstacle_bridge",
         name="proximity_obstacle_bridge",
         output="screen",
-        condition=IfCondition(use_proximity_bridge),
-        parameters=[params_file],
+        condition=IfCondition(PythonExpression([
+            '"', use_proximity_bridge, '" == "true" or "',
+            proximity_surface_visualization, '" == "true"',
+        ])),
+        parameters=[
+            params_file,
+            {
+                "publish_collision_obstacles": ParameterValue(
+                    PythonExpression([
+                        'True if "', use_proximity_bridge, '" == "true" else False'
+                    ]),
+                    value_type=bool,
+                ),
+                "surface_patch_fixed_visualization": ParameterValue(
+                    PythonExpression([
+                        'True if "', proximity_surface_visualization,
+                        '" == "true" else False'
+                    ]),
+                    value_type=bool,
+                ),
+                "surface_patch_enabled": ParameterValue(
+                    PythonExpression([
+                        'True if "', surface_patch_enabled, '" == "true" else False'
+                    ]),
+                    value_type=bool,
+                ),
+                "surface_patch_collision_memory_enabled": ParameterValue(
+                    PythonExpression([
+                        'True if "', surface_patch_collision_memory_enabled,
+                        '" == "true" else False'
+                    ]),
+                    value_type=bool,
+                ),
+            },
+        ],
     )
 
     data_recorder = Node(
@@ -344,6 +385,24 @@ def generate_launch_description():
             "use_proximity_bridge",
             default_value="false",
             description="Use external proximity topics to build obstacle markers.",
+        ),
+        DeclareLaunchArgument(
+            "proximity_surface_visualization",
+            default_value="true",
+            description=(
+                "Publish RViz-only fixed surface patches from proximity sensor range hits. "
+                "When use_proximity_bridge is false this does not publish collision obstacles."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "surface_patch_enabled",
+            default_value="true",
+            description="Publish live proximity surface patch markers into /obstacles.",
+        ),
+        DeclareLaunchArgument(
+            "surface_patch_collision_memory_enabled",
+            default_value="true",
+            description="Feed remembered proximity surface patches into /obstacles.",
         ),
         DeclareLaunchArgument(
             "bridge_publish_rate",

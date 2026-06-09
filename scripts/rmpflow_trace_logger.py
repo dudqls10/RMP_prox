@@ -57,6 +57,8 @@ class RmpflowTraceLogger(Node):
         self.declare_parameter("target_metric_topic", "/target_metric")
         self.declare_parameter("debug_state_topic", "/rmp_debug_state")
         self.declare_parameter("rmp_ee_pose_topic", "/rmp_ee_pose")
+        self.declare_parameter("rmp_joint_accel_topic", "/rmp_joint_accel")
+        self.declare_parameter("rmp_tcp_accel_topic", "/rmp_tcp_accel")
         self.declare_parameter("obstacle_marker_topic", "/obstacles")
         self.declare_parameter("repulsion_metric_marker_topic", "/repulsion_metric_markers")
         self.declare_parameter("tcp_accel_marker_topic", "/tcp_accel_marker")
@@ -89,7 +91,9 @@ class RmpflowTraceLogger(Node):
         self.range_labels = [self._topic_label(topic) for topic in self.range_topics]
 
         self.latest: Dict[str, StampedValue] = {}
+        self.latest_intervals: Dict[str, float] = {}
         self.latest_ranges: Dict[str, StampedValue] = {}
+        self.latest_range_intervals: Dict[str, float] = {}
         self.active_obstacle_markers: Dict[Tuple[str, int], Marker] = {}
         self.repulsion_metric_markers: Dict[Tuple[str, int], Marker] = {}
         self.tcp_accel_marker: Optional[StampedValue] = None
@@ -139,7 +143,7 @@ class RmpflowTraceLogger(Node):
         self.create_subscription(
             PoseStamped,
             str(self.get_parameter("controller_goal_topic").value),
-            lambda msg: self._store("controller_goal", msg.pose),
+            self._on_controller_goal,
             10,
         )
         self.create_subscription(
@@ -179,6 +183,18 @@ class RmpflowTraceLogger(Node):
             10,
         )
         self.create_subscription(
+            Float64MultiArray,
+            str(self.get_parameter("rmp_joint_accel_topic").value),
+            lambda msg: self._store("rmp_joint_accel", list(msg.data)),
+            10,
+        )
+        self.create_subscription(
+            Float64MultiArray,
+            str(self.get_parameter("rmp_tcp_accel_topic").value),
+            lambda msg: self._store("rmp_tcp_accel", list(msg.data)),
+            10,
+        )
+        self.create_subscription(
             MarkerArray,
             str(self.get_parameter("obstacle_marker_topic").value),
             self._on_obstacles,
@@ -205,10 +221,23 @@ class RmpflowTraceLogger(Node):
             )
 
     def _store(self, key: str, data: Any) -> None:
-        self.latest[key] = StampedValue(self._now_s(), data)
+        now_s = self._now_s()
+        previous = self.latest.get(key)
+        if previous is not None:
+            self.latest_intervals[key] = now_s - previous.stamp_s
+        self.latest[key] = StampedValue(now_s, data)
+
+    def _on_controller_goal(self, msg: PoseStamped) -> None:
+        self._store("controller_goal", msg.pose)
+        stamp_s = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        self.latest["controller_goal_header_stamp_s"] = StampedValue(self._now_s(), stamp_s)
 
     def _store_range(self, topic: str, msg: Range) -> None:
-        self.latest_ranges[topic] = StampedValue(self._now_s(), msg)
+        now_s = self._now_s()
+        previous = self.latest_ranges.get(topic)
+        if previous is not None:
+            self.latest_range_intervals[topic] = now_s - previous.stamp_s
+        self.latest_ranges[topic] = StampedValue(now_s, msg)
 
     def _on_obstacles(self, msg: MarkerArray) -> None:
         for marker in msg.markers:
@@ -261,8 +290,10 @@ class RmpflowTraceLogger(Node):
         self._fill_pose(row, "controller_goal", "controller_goal")
         self._fill_pose(row, "rmp_ee_pose", "rmp_ee")
         self._fill_joint_state(row)
-        self._fill_vector(row, "target_q", "target_q", 6)
-        self._fill_vector(row, "command_q", "command_q", 6)
+        self._fill_vector(row, "target_q", "target_q", 6, "rad")
+        self._fill_vector(row, "command_q", "command_q", 6, "rad")
+        self._fill_vector(row, "rmp_joint_accel", "rmp_joint_accel", 6, "rad_s2")
+        self._fill_cartesian_vector(row, "rmp_tcp_accel", "rmp_tcp_accel", "m_s2")
         self._fill_target_metric(row)
         self._fill_debug_state(row)
         self._fill_marker_summaries(row)
@@ -281,12 +312,18 @@ class RmpflowTraceLogger(Node):
         row[f"{prefix}_qz"] = self._fmt(pose.orientation.z)
         row[f"{prefix}_qw"] = self._fmt(pose.orientation.w)
         row[f"{prefix}_age_s"] = self._age_s(key)
+        row[f"{prefix}_dt_s"] = self._interval_s(key)
+        if key == "controller_goal":
+            stamp = self._latest_data("controller_goal_header_stamp_s")
+            if stamp is not None:
+                row["controller_goal_msg_stamp_s"] = self._fmt(stamp)
 
     def _fill_joint_state(self, row: Dict[str, Any]) -> None:
         joint_state = self._latest_data("joint_state")
         if joint_state is None:
             return
         row["joint_state_age_s"] = self._age_s("joint_state")
+        row["joint_state_dt_s"] = self._interval_s("joint_state")
         for index in range(6):
             if index < len(joint_state.name):
                 row[f"joint_{index + 1}_name"] = joint_state.name[index]
@@ -294,21 +331,62 @@ class RmpflowTraceLogger(Node):
                 row[f"joint_{index + 1}_pos_rad"] = self._fmt(joint_state.position[index])
             if index < len(joint_state.velocity):
                 row[f"joint_{index + 1}_vel_rad_s"] = self._fmt(joint_state.velocity[index])
+        if joint_state.velocity:
+            velocity_norm = math.sqrt(sum(float(value) * float(value) for value in joint_state.velocity[:6]))
+            row["joint_state_velocity_norm"] = self._fmt(velocity_norm)
 
-    def _fill_vector(self, row: Dict[str, Any], key: str, prefix: str, count: int) -> None:
+    def _fill_vector(
+        self,
+        row: Dict[str, Any],
+        key: str,
+        prefix: str,
+        count: int,
+        unit_suffix: str,
+    ) -> None:
         values = self._latest_data(key)
         if values is None:
             return
         row[f"{prefix}_age_s"] = self._age_s(key)
+        row[f"{prefix}_dt_s"] = self._interval_s(key)
+        norm_terms = []
         for index in range(count):
             if index < len(values):
-                row[f"{prefix}_{index + 1}_rad"] = self._fmt(values[index])
+                row[f"{prefix}_{index + 1}_{unit_suffix}"] = self._fmt(values[index])
+                norm_terms.append(float(values[index]))
+        if norm_terms:
+            row[f"{prefix}_norm"] = self._fmt(
+                math.sqrt(sum(value * value for value in norm_terms))
+            )
+
+    def _fill_cartesian_vector(
+        self,
+        row: Dict[str, Any],
+        key: str,
+        prefix: str,
+        unit_suffix: str,
+    ) -> None:
+        values = self._latest_data(key)
+        if values is None:
+            return
+        row[f"{prefix}_age_s"] = self._age_s(key)
+        row[f"{prefix}_dt_s"] = self._interval_s(key)
+        axes = ["x", "y", "z"]
+        norm_terms = []
+        for index, axis in enumerate(axes):
+            if index < len(values):
+                row[f"{prefix}_{axis}_{unit_suffix}"] = self._fmt(values[index])
+                norm_terms.append(float(values[index]))
+        if norm_terms:
+            row[f"{prefix}_norm"] = self._fmt(
+                math.sqrt(sum(value * value for value in norm_terms))
+            )
 
     def _fill_target_metric(self, row: Dict[str, Any]) -> None:
         metric = self._latest_data("target_metric")
         if metric is None:
             return
         row["target_metric_age_s"] = self._age_s("target_metric")
+        row["target_metric_dt_s"] = self._interval_s("target_metric")
         for index in range(min(9, len(metric))):
             row[f"target_metric_m{index // 3}{index % 3}"] = self._fmt(metric[index])
         if len(metric) >= 9:
@@ -320,24 +398,36 @@ class RmpflowTraceLogger(Node):
         if debug is None:
             return
         row["debug_state_age_s"] = self._age_s("debug_state")
+        row["debug_state_dt_s"] = self._interval_s("debug_state")
         for index, field in enumerate(self.DEBUG_FIELDS):
             if index < len(debug):
                 row[field] = self._fmt(debug[index])
 
     def _fill_marker_summaries(self, row: Dict[str, Any]) -> None:
         row["obstacle_marker_count"] = len(self.active_obstacle_markers)
+        row["obstacle_marker_update_age_s"] = self._age_s("obstacle_marker_stamp")
+        row["obstacle_marker_update_dt_s"] = self._interval_s("obstacle_marker_stamp")
         obstacle_frames = sorted(
             marker.text for marker in self.active_obstacle_markers.values() if marker.text
         )
         row["obstacle_marker_frames"] = "|".join(obstacle_frames)
+        row["obstacle_marker_centers"] = self._serialize_marker_centers(
+            self.active_obstacle_markers
+        )
+        self._fill_closest_obstacle(row)
 
         row["repulsion_metric_dot_count"] = len(self.repulsion_metric_markers)
+        row["repulsion_metric_update_age_s"] = self._age_s("repulsion_metric_stamp")
+        row["repulsion_metric_update_dt_s"] = self._interval_s("repulsion_metric_stamp")
         if self.repulsion_metric_markers:
             row["repulsion_metric_max_red"] = self._fmt(
                 max(marker.color.r for marker in self.repulsion_metric_markers.values())
             )
             row["repulsion_metric_max_alpha"] = self._fmt(
                 max(marker.color.a for marker in self.repulsion_metric_markers.values())
+            )
+            row["repulsion_metric_centers"] = self._serialize_marker_centers(
+                self.repulsion_metric_markers
             )
 
         if self.tcp_accel_marker is None:
@@ -377,10 +467,60 @@ class RmpflowTraceLogger(Node):
             row[f"{label}_usable"] = int(usable)
             row[f"{label}_triggered"] = int(triggered)
             row[f"{label}_age_s"] = self._fmt(self._now_s() - stamped.stamp_s)
+            if topic in self.latest_range_intervals:
+                row[f"{label}_dt_s"] = self._fmt(self.latest_range_intervals[topic])
             if triggered:
                 active_topics.append(label)
         row["proximity_triggered_count"] = len(active_topics)
         row["proximity_triggered_topics"] = "|".join(active_topics)
+
+    def _serialize_marker_centers(
+        self,
+        markers: Dict[Tuple[str, int], Marker],
+        max_items: int = 80,
+    ) -> str:
+        entries = []
+        for (namespace, marker_id), marker in sorted(markers.items(), key=lambda item: item[0]):
+            position = marker.pose.position
+            radius = max(float(marker.scale.x), float(marker.scale.y), float(marker.scale.z)) * 0.5
+            entries.append(
+                f"{namespace}:{marker_id}:"
+                f"{position.x:.5f}:{position.y:.5f}:{position.z:.5f}:{radius:.5f}"
+            )
+            if len(entries) >= max_items:
+                entries.append("truncated")
+                break
+        return "|".join(entries)
+
+    def _fill_closest_obstacle(self, row: Dict[str, Any]) -> None:
+        ee_pose = self._latest_data("rmp_ee_pose")
+        if ee_pose is None or not self.active_obstacle_markers:
+            return
+        ee = ee_pose.position
+        closest = None
+        for (namespace, marker_id), marker in self.active_obstacle_markers.items():
+            position = marker.pose.position
+            radius = max(float(marker.scale.x), float(marker.scale.y), float(marker.scale.z)) * 0.5
+            center_distance = math.sqrt(
+                (position.x - ee.x) ** 2 +
+                (position.y - ee.y) ** 2 +
+                (position.z - ee.z) ** 2
+            )
+            surface_distance = center_distance - radius
+            candidate = (surface_distance, center_distance, radius, namespace, marker_id, position)
+            if closest is None or candidate[0] < closest[0]:
+                closest = candidate
+        if closest is None:
+            return
+        surface_distance, center_distance, radius, namespace, marker_id, position = closest
+        row["closest_obstacle_ns"] = namespace
+        row["closest_obstacle_id"] = marker_id
+        row["closest_obstacle_x"] = self._fmt(position.x)
+        row["closest_obstacle_y"] = self._fmt(position.y)
+        row["closest_obstacle_z"] = self._fmt(position.z)
+        row["closest_obstacle_radius_m"] = self._fmt(radius)
+        row["closest_obstacle_center_dist_to_ee_m"] = self._fmt(center_distance)
+        row["closest_obstacle_surface_dist_to_ee_m"] = self._fmt(surface_distance)
 
     def _range_is_usable(self, msg: Range) -> bool:
         if not math.isfinite(float(msg.range)):
@@ -417,9 +557,12 @@ class RmpflowTraceLogger(Node):
                     f"{prefix}_qz",
                     f"{prefix}_qw",
                     f"{prefix}_age_s",
+                    f"{prefix}_dt_s",
                 ]
             )
+        header.append("controller_goal_msg_stamp_s")
         header.append("joint_state_age_s")
+        header.append("joint_state_dt_s")
         for index in range(6):
             header.extend(
                 [
@@ -428,20 +571,53 @@ class RmpflowTraceLogger(Node):
                     f"joint_{index + 1}_vel_rad_s",
                 ]
             )
+        header.append("joint_state_velocity_norm")
         for prefix in ["target_q", "command_q"]:
             header.append(f"{prefix}_age_s")
+            header.append(f"{prefix}_dt_s")
             header.extend(f"{prefix}_{index + 1}_rad" for index in range(6))
+            header.append(f"{prefix}_norm")
+        header.append("rmp_joint_accel_age_s")
+        header.append("rmp_joint_accel_dt_s")
+        header.extend(f"rmp_joint_accel_{index + 1}_rad_s2" for index in range(6))
+        header.append("rmp_joint_accel_norm")
+        header.append("rmp_tcp_accel_age_s")
+        header.append("rmp_tcp_accel_dt_s")
+        header.extend(
+            [
+                "rmp_tcp_accel_x_m_s2",
+                "rmp_tcp_accel_y_m_s2",
+                "rmp_tcp_accel_z_m_s2",
+                "rmp_tcp_accel_norm",
+            ]
+        )
         header.append("target_metric_age_s")
+        header.append("target_metric_dt_s")
         header.extend(f"target_metric_m{row}{col}" for row in range(3) for col in range(3))
         header.extend(["target_metric_trace", "target_metric_frobenius", "debug_state_age_s"])
+        header.append("debug_state_dt_s")
         header.extend(self.DEBUG_FIELDS)
         header.extend(
             [
                 "obstacle_marker_count",
+                "obstacle_marker_update_age_s",
+                "obstacle_marker_update_dt_s",
                 "obstacle_marker_frames",
+                "obstacle_marker_centers",
+                "closest_obstacle_ns",
+                "closest_obstacle_id",
+                "closest_obstacle_x",
+                "closest_obstacle_y",
+                "closest_obstacle_z",
+                "closest_obstacle_radius_m",
+                "closest_obstacle_center_dist_to_ee_m",
+                "closest_obstacle_surface_dist_to_ee_m",
                 "repulsion_metric_dot_count",
+                "repulsion_metric_update_age_s",
+                "repulsion_metric_update_dt_s",
                 "repulsion_metric_max_red",
                 "repulsion_metric_max_alpha",
+                "repulsion_metric_centers",
                 "tcp_accel_marker_age_s",
                 "tcp_accel_marker_length_m",
                 "tcp_accel_dir_x",
@@ -465,6 +641,7 @@ class RmpflowTraceLogger(Node):
                     f"{label}_usable",
                     f"{label}_triggered",
                     f"{label}_age_s",
+                    f"{label}_dt_s",
                 ]
             )
         return header
@@ -480,6 +657,12 @@ class RmpflowTraceLogger(Node):
         if stamped is None:
             return ""
         return self._fmt(self._now_s() - stamped.stamp_s)
+
+    def _interval_s(self, key: str) -> str:
+        interval = self.latest_intervals.get(key)
+        if interval is None:
+            return ""
+        return self._fmt(interval)
 
     def _now_s(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
@@ -520,6 +703,8 @@ class RmpflowTraceLogger(Node):
             f"sensors={triggered} "
             f"obs={row.get('obstacle_marker_count', '')} "
             f"metric_dots={row.get('repulsion_metric_dot_count', '')} "
+            f"qdd={row.get('rmp_joint_accel_norm', '')} "
+            f"tcp_accel={row.get('rmp_tcp_accel_norm', '')} "
             f"tcp_accel_len={row.get('tcp_accel_marker_length_m', '')}m "
             f"target_q=[{target_q}] "
             f"cmd=[{command_q}]"
@@ -544,9 +729,12 @@ def main(args=None) -> None:
     node = RmpflowTraceLogger()
     try:
         rclpy.spin(node)
+    except (KeyboardInterrupt, RuntimeError):
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

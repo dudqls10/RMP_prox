@@ -231,7 +231,6 @@ RmpSolveResult LearningReadyRmpAdapter::rollout_single(
     observation.qd,
     observation.vector_targets,
     observation.obstacles,
-    observation.sector_proximity,
     residuals);
 }
 
@@ -252,7 +251,6 @@ std::vector<RmpBatchInput> LearningReadyRmpAdapter::make_batch_inputs(
       observation.qd,
       observation.vector_targets,
       observation.obstacles,
-      observation.sector_proximity,
       residual_batches.empty() ? std::unordered_map<std::string, ExternalRmpFeature>{} :
       residual_batches[index]
     });

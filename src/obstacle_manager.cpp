@@ -22,6 +22,7 @@ struct ObstacleData
 {
   geometry_msgs::msg::Point position;
   double radius{0.1};
+  double height{0.6};
 };
 
 class ObstacleManagerNode : public rclcpp::Node
@@ -32,6 +33,7 @@ public:
   {
     declare_parameter("num_obstacles", 1);
     declare_parameter("default_radius", 0.1);
+    declare_parameter("default_height", 0.6);
     declare_parameter("default_positions", std::vector<double>{});
 
     obstacle_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("obstacles", 10);
@@ -53,7 +55,8 @@ public:
       make_point(0.5, 0.0, 0.3),
     };
     const auto configured_positions = get_parameter("default_positions").as_double_array();
-    const auto radius = get_parameter("default_radius").as_double();
+    default_radius_ = std::max(0.01, get_parameter("default_radius").as_double());
+    default_height_ = std::max(0.01, get_parameter("default_height").as_double());
     const auto num_obstacles = get_parameter("num_obstacles").as_int();
     for (int index = 0; index < num_obstacles; ++index) {
       const std::size_t base = static_cast<std::size_t>(index) * 3;
@@ -64,14 +67,19 @@ public:
             configured_positions[base],
             configured_positions[base + 1],
             configured_positions[base + 2]),
-          radius);
+          default_radius_,
+          default_height_);
         continue;
       }
       if (static_cast<std::size_t>(index) >= defaults.size()) {
-        add_obstacle(index, make_point(0.0, 0.0, 0.0), radius);
+        add_obstacle(index, make_point(0.0, 0.0, 0.0), default_radius_, default_height_);
         continue;
       }
-      add_obstacle(index, defaults[static_cast<std::size_t>(index)], radius);
+      add_obstacle(
+        index,
+        defaults[static_cast<std::size_t>(index)],
+        default_radius_,
+        default_height_);
     }
 
     timer_ = create_wall_timer(
@@ -105,30 +113,38 @@ private:
     return control;
   }
 
-  void add_obstacle(int id, const geometry_msgs::msg::Point & position, double radius)
+  void add_obstacle(
+    int id,
+    const geometry_msgs::msg::Point & position,
+    double radius,
+    double height)
   {
-    obstacles_[id] = ObstacleData{position, radius};
+    radius = std::max(radius, 0.01);
+    height = std::max(height, 0.01);
+    obstacles_[id] = ObstacleData{position, radius, height};
 
     visualization_msgs::msg::InteractiveMarker marker;
     marker.header.frame_id = "base_link";
     marker.name = "obstacle_" + std::to_string(id);
     marker.description = "Obstacle " + std::to_string(id);
     marker.pose.position = position;
-    marker.scale = radius * 3.0;
+    marker.pose.orientation.w = 1.0;
+    marker.scale = std::max(radius * 3.0, height);
 
-    visualization_msgs::msg::Marker sphere;
-    sphere.type = visualization_msgs::msg::Marker::SPHERE;
-    sphere.scale.x = radius * 2.0;
-    sphere.scale.y = radius * 2.0;
-    sphere.scale.z = radius * 2.0;
-    sphere.color.r = 1.0F;
-    sphere.color.g = 0.2F;
-    sphere.color.b = 0.2F;
-    sphere.color.a = 0.7F;
+    visualization_msgs::msg::Marker cylinder;
+    cylinder.type = visualization_msgs::msg::Marker::CYLINDER;
+    cylinder.pose.orientation.w = 1.0;
+    cylinder.scale.x = radius * 2.0;
+    cylinder.scale.y = radius * 2.0;
+    cylinder.scale.z = height;
+    cylinder.color.r = 1.0F;
+    cylinder.color.g = 0.2F;
+    cylinder.color.b = 0.2F;
+    cylinder.color.a = 0.7F;
 
     visualization_msgs::msg::InteractiveMarkerControl visible;
     visible.always_visible = true;
-    visible.markers.push_back(sphere);
+    visible.markers.push_back(cylinder);
     marker.controls.push_back(visible);
 
     visualization_msgs::msg::InteractiveMarkerControl move_3d;
@@ -168,7 +184,9 @@ private:
   void on_add_obstacle(const visualization_msgs::msg::Marker::SharedPtr msg)
   {
     if (msg->action == visualization_msgs::msg::Marker::ADD) {
-      add_obstacle(msg->id, msg->pose.position, msg->scale.x * 0.5);
+      const double radius = msg->scale.x > 0.0 ? msg->scale.x * 0.5 : default_radius_;
+      const double height = msg->scale.z > 0.0 ? msg->scale.z : default_height_;
+      add_obstacle(msg->id, msg->pose.position, radius, height);
       publish_obstacles();
       return;
     }
@@ -190,13 +208,13 @@ private:
       marker.header.stamp = now();
       marker.ns = "obstacles";
       marker.id = id;
-      marker.type = visualization_msgs::msg::Marker::SPHERE;
+      marker.type = visualization_msgs::msg::Marker::CYLINDER;
       marker.action = visualization_msgs::msg::Marker::ADD;
       marker.pose.position = obstacle.position;
       marker.pose.orientation.w = 1.0;
       marker.scale.x = obstacle.radius * 2.0;
       marker.scale.y = obstacle.radius * 2.0;
-      marker.scale.z = obstacle.radius * 2.0;
+      marker.scale.z = obstacle.height;
       marker.color.r = 1.0F;
       marker.color.g = 0.2F;
       marker.color.b = 0.2F;
@@ -207,6 +225,8 @@ private:
   }
 
   std::unordered_map<int, ObstacleData> obstacles_;
+  double default_radius_{0.1};
+  double default_height_{0.6};
   std::shared_ptr<interactive_markers::InteractiveMarkerServer> server_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr obstacle_pub_;
   rclcpp::Subscription<visualization_msgs::msg::Marker>::SharedPtr add_obstacle_sub_;

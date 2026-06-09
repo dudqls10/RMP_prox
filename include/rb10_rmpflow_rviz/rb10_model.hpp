@@ -107,26 +107,26 @@ public:
   }};
 
   inline static const std::array<SensorControlPointSpec, 20> sensor_control_points{{
-    {"tof6_1_L", LINK5, Eigen::Vector3d(-0.06, 0.0, 0.11715),  0.1},
-    {"tof6_1_F", LINK5, Eigen::Vector3d(0.0, 0.0, 0.17715), 0.1},
-    {"tof6_1_R", LINK5, Eigen::Vector3d(0.06, 0.0, 0.11715), 0.1},
-    {"tof6_1_U", LINK5, Eigen::Vector3d(0.0, 0.0667, 0.11715), 0.1},
-    {"tof_S", LINK3_5, Eigen::Vector3d(0.0645, 0.0, 0.405075),  0.1},
-    {"tof_E", LINK3_5, Eigen::Vector3d(0.0, 0.0645, 0.405075),  0.1},
-    {"tof_N", LINK3_5, Eigen::Vector3d(-0.0645, 0.0, 0.405075), 0.1},
-    {"tof_W", LINK3_5, Eigen::Vector3d(0.0, -0.0645, 0.405075), 0.1},
-    {"tof3_1_S", LINK3_5, Eigen::Vector3d(0.0645, 0.0, 0.205075),  0.1},
-    {"tof3_1_W", LINK3_5, Eigen::Vector3d(0.0, -0.0645, 0.205075), 0.1},
-    {"tof3_1_N", LINK3_5, Eigen::Vector3d(-0.0645, 0.0, 0.205075), 0.1},
-    {"tof3_1_E", LINK3_5, Eigen::Vector3d(0.0, 0.0645, 0.205075),  0.1},
-    {"tof2_1_E", LINK2, Eigen::Vector3d(0.0, -0.1085, 0.2262), 0.1},
-    {"tof2_1_S", LINK2, Eigen::Vector3d(0.079, -0.1875, 0.2262), 0.1},
-    {"tof2_1_W", LINK2, Eigen::Vector3d(0.0, -0.2665, 0.2262), 0.1},
-    {"tof2_1_N", LINK2, Eigen::Vector3d(-0.079, -0.1875, 0.2262), 0.1},
-    {"tof2_E", LINK2, Eigen::Vector3d(0.0, -0.1085, 0.4262), 0.1},
-    {"tof2_S", LINK2, Eigen::Vector3d(0.079, -0.1875, 0.4262), 0.1},
-    {"tof2_W", LINK2, Eigen::Vector3d(0.0, -0.2665, 0.4262), 0.1},
-    {"tof2_N", LINK2, Eigen::Vector3d(-0.079, -0.1875, 0.4262), 0.1},
+    {"tof6_1_L", LINK5, Eigen::Vector3d(-0.06, 0.0, 0.11715),  0.05},
+    {"tof6_1_F", LINK5, Eigen::Vector3d(0.0, 0.0, 0.17715), 0.05},
+    {"tof6_1_R", LINK5, Eigen::Vector3d(0.06, 0.0, 0.11715), 0.05},
+    {"tof6_1_U", LINK5, Eigen::Vector3d(0.0, 0.0667, 0.11715), 0.05},
+    {"tof_S", LINK3_5, Eigen::Vector3d(0.0645, 0.0, 0.405075),  0.05},
+    {"tof_E", LINK3_5, Eigen::Vector3d(0.0, 0.0645, 0.405075),  0.05},
+    {"tof_N", LINK3_5, Eigen::Vector3d(-0.0645, 0.0, 0.405075), 0.05},
+    {"tof_W", LINK3_5, Eigen::Vector3d(0.0, -0.0645, 0.405075), 0.05},
+    {"tof3_1_S", LINK3_5, Eigen::Vector3d(0.0645, 0.0, 0.205075),  0.05},
+    {"tof3_1_W", LINK3_5, Eigen::Vector3d(0.0, -0.0645, 0.205075), 0.05},
+    {"tof3_1_N", LINK3_5, Eigen::Vector3d(-0.0645, 0.0, 0.205075), 0.05},
+    {"tof3_1_E", LINK3_5, Eigen::Vector3d(0.0, 0.0645, 0.205075),  0.05},
+    {"tof2_1_E", LINK2, Eigen::Vector3d(0.0, -0.1085, 0.2262), 0.05},
+    {"tof2_1_S", LINK2, Eigen::Vector3d(0.079, -0.1875, 0.2262), 0.05},
+    {"tof2_1_W", LINK2, Eigen::Vector3d(0.0, -0.2665, 0.2262), 0.05},
+    {"tof2_1_N", LINK2, Eigen::Vector3d(-0.079, -0.1875, 0.2262), 0.05},
+    {"tof2_E", LINK2, Eigen::Vector3d(0.0, -0.1085, 0.4262), 0.05},
+    {"tof2_S", LINK2, Eigen::Vector3d(0.079, -0.1875, 0.4262), 0.05},
+    {"tof2_W", LINK2, Eigen::Vector3d(0.0, -0.2665, 0.4262), 0.05},
+    {"tof2_N", LINK2, Eigen::Vector3d(-0.079, -0.1875, 0.4262), 0.05},
   }};
 
   static Eigen::Affine3d origin_transform(
@@ -160,7 +160,15 @@ public:
     std::size_t parent_link)
   {
     Eigen::Affine3d transform = Eigen::Affine3d::Identity();
+    if (parent_link == BASE_LINK || parent_link == LINK0) {
+      return transform;
+    }
+
     transform = transform * Eigen::AngleAxisd(q[0], Eigen::Vector3d::UnitZ());
+    if (parent_link == LINK1) {
+      return transform;
+    }
+
     transform = transform * origin_transform(0.0, 0.0, 0.197);
     if (parent_link == LINK2) {
       return transform * Eigen::AngleAxisd(q[1], Eigen::Vector3d::UnitY());
@@ -168,6 +176,10 @@ public:
 
     transform = transform * Eigen::AngleAxisd(q[1], Eigen::Vector3d::UnitY());
     transform = transform * origin_transform(0.0, -0.1875, 0.6127);
+    if (parent_link == LINK3) {
+      return transform * Eigen::AngleAxisd(q[2], Eigen::Vector3d::UnitY());
+    }
+
     transform = transform * Eigen::AngleAxisd(q[2], Eigen::Vector3d::UnitY());
     const Eigen::Affine3d link3_5_transform = transform * origin_transform(0.0, 0.1484, 0.0);
     if (parent_link == LINK3_5) {
@@ -175,6 +187,10 @@ public:
     }
 
     transform = link3_5_transform * origin_transform(0.0, 0.0, 0.57015);
+    if (parent_link == LINK4) {
+      return transform * Eigen::AngleAxisd(q[3], Eigen::Vector3d::UnitY());
+    }
+
     transform = transform * Eigen::AngleAxisd(q[3], Eigen::Vector3d::UnitY());
     transform = transform * origin_transform(0.0, -0.11715, 0.0);
     transform = transform * Eigen::AngleAxisd(q[4], Eigen::Vector3d::UnitZ());
@@ -185,6 +201,18 @@ public:
     transform = transform * origin_transform(0.0, 0.0, 0.11715);
     if (parent_link == LINK6) {
       return transform * Eigen::AngleAxisd(q[5], Eigen::Vector3d::UnitY());
+    }
+
+    transform = transform * Eigen::AngleAxisd(q[5], Eigen::Vector3d::UnitY());
+    const Eigen::Affine3d tcp_transform = transform * origin_transform(0.0, -0.1153, 0.0);
+    if (parent_link == TCP) {
+      return tcp_transform;
+    }
+    if (parent_link == TCP_RMP) {
+      return tcp_transform * origin_transform(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    }
+    if (parent_link == TCP_GRIPPER) {
+      return tcp_transform * origin_transform(0.0, -0.285398, 0.0, 0.0, 1.5707963268, 1.5707963268);
     }
 
     throw std::runtime_error("Unsupported sensor parent link index");

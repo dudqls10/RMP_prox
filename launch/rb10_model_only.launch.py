@@ -46,7 +46,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /robot_description
+        Value: /rb10/robot_description
       Enabled: true
       Links:
         All Links Enabled: true
@@ -178,6 +178,9 @@ def generate_launch_description():
                 "robot_description": robot_description,
                 "publish_frequency": 30.0,
             }],
+            remappings=[
+                ("robot_description", "/rb10/robot_description"),
+            ],
         ),
         Node(
             package="joint_state_publisher",

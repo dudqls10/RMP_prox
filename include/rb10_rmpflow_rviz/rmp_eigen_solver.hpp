@@ -38,34 +38,6 @@ struct ExternalRmpFeature
   Eigen::VectorXd acceleration;
 };
 
-enum class WallFollowingSector : std::size_t
-{
-  East = 0,
-  West = 1,
-  North = 2,
-  South = 3
-};
-
-constexpr std::size_t kWallFollowingSectorCount = 4;
-
-struct SectorProximityData
-{
-  std::array<double, kWallFollowingSectorCount> distances{};
-  std::array<double, kWallFollowingSectorCount> sigmas{};
-  std::array<bool, kWallFollowingSectorCount> has_sigma{};
-  std::array<bool, kWallFollowingSectorCount> valid{};
-  double stamp_sec{0.0};
-  bool enabled{false};
-
-  SectorProximityData()
-  {
-    distances.fill(std::numeric_limits<double>::infinity());
-    sigmas.fill(0.0);
-    has_sigma.fill(false);
-    valid.fill(false);
-  }
-};
-
 struct CSpaceTargetParams
 {
   double metric_scalar{0.005};
@@ -132,97 +104,17 @@ struct CollisionRmpParams
   double metric_scalar{1.0};
   double metric_exploder_std_dev{0.02};
   double metric_exploder_eps{0.001};
+  double up_speed{0.08};
+  double up_gain{4.0};
+  double safe_distance{0.10};
+  double safe_gain{5.0};
+  double max_accel{2.0};
+  double candidate_lookahead{0.08};
+  double goal_weight{1.0};
+  double clearance_weight{1.0};
+  double velocity_weight{0.25};
+  double toward_penalty_weight{2.0};
 };
-
-struct WallFollowingCollisionParams
-{
-  double d_safe{0.10};
-  double d_ref{0.15};
-  double d_on{0.22};
-  double d_off{0.30};
-  double kappa_sigma{1.0};
-  double gamma_cbf{2.0};
-  double k_dist{1.0};
-  double k_vel{4.0};
-  double k_safe_0{8.0};
-  double k_safe_1{4.0};
-  double v_t_max{0.10};
-  double v_n_toward_max{0.03};
-  double v_n_away_max{0.10};
-  double a_safe_max{0.50};
-  double m_t{1.0};
-  double m_n{5.0};
-  double m_max{50.0};
-  double direction_lock_time{1.0};
-  double nominal_velocity_dt{0.01};
-  double derivative_filter_alpha{0.35};
-  double near_zero_metric{1e-9};
-  bool normal_points_toward_obstacle{true};
-};
-
-struct SectorWallModuleSpec
-{
-  const char * name;
-  std::size_t parent_link;
-  std::array<std::size_t, kWallFollowingSectorCount> control_point_indices;
-  std::array<Eigen::Vector3d, kWallFollowingSectorCount> local_normals;
-};
-
-inline Eigen::Vector3d normalized_or(
-  const Eigen::Vector3d & value,
-  const Eigen::Vector3d & fallback)
-{
-  const double norm = value.norm();
-  if (norm > 1e-9) {
-    return value / norm;
-  }
-  return fallback;
-}
-
-inline SectorWallModuleSpec make_sector_wall_module_spec(
-  const char * name,
-  std::size_t parent_link,
-  const std::array<std::size_t, kWallFollowingSectorCount> & indices)
-{
-  Eigen::Vector3d center = Eigen::Vector3d::Zero();
-  for (const auto index : indices) {
-    center += RB10Model::sensor_control_points[index].offset;
-  }
-  center /= static_cast<double>(indices.size());
-
-  SectorWallModuleSpec spec{
-    name,
-    parent_link,
-    indices,
-    {
-      normalized_or(
-        RB10Model::sensor_control_points[indices[0]].offset - center,
-        Eigen::Vector3d::UnitX()),
-      normalized_or(
-        RB10Model::sensor_control_points[indices[1]].offset - center,
-        -Eigen::Vector3d::UnitX()),
-      normalized_or(
-        RB10Model::sensor_control_points[indices[2]].offset - center,
-        Eigen::Vector3d::UnitY()),
-      normalized_or(
-        RB10Model::sensor_control_points[indices[3]].offset - center,
-        -Eigen::Vector3d::UnitY())
-    }
-  };
-  return spec;
-}
-
-inline const std::array<SectorWallModuleSpec, 5> & default_sector_wall_modules()
-{
-  static const std::array<SectorWallModuleSpec, 5> modules{{
-    make_sector_wall_module_spec("tof6_1", RB10Model::LINK5, {{2, 0, 3, 1}}),
-    make_sector_wall_module_spec("tof_link3_5_high", RB10Model::LINK3_5, {{5, 7, 6, 4}}),
-    make_sector_wall_module_spec("tof3_1", RB10Model::LINK3_5, {{11, 9, 10, 8}}),
-    make_sector_wall_module_spec("tof2_1", RB10Model::LINK2, {{12, 14, 15, 13}}),
-    make_sector_wall_module_spec("tof2", RB10Model::LINK2, {{16, 18, 19, 17}})
-  }};
-  return modules;
-}
 
 struct DampingRmpParams
 {
@@ -371,7 +263,7 @@ struct EigenRmpConfig
   AxisTargetParams axis_target{};
   AxisTargetParams wrist_axis_target{};
   CollisionRmpParams collision{};
-  WallFollowingCollisionParams wall_following_collision{};
+  CollisionRmpParams custom_avoidance{};
   DampingRmpParams damping{};
   std::vector<BodyObstacle> body_obstacles;
   std::vector<RmpNodeConfig> graph_nodes{default_rmp_graph_nodes()};
@@ -409,7 +301,11 @@ public:
     accumulate_joint_limits(q, qd, metric, force);
     accumulate_joint_velocity_cap(q, qd, metric, force);
     accumulate_target(context, qd, goal, metric, force);
-    accumulate_collision(context, qd, obstacles, metric, force);
+    if (config_.collision.policy == "custom_avoidance") {
+      accumulate_custom_avoidance_collision(context, qd, goal, obstacles, metric, force);
+    } else {
+      accumulate_collision(context, qd, obstacles, metric, force);
+    }
     accumulate_joint_damping(q, qd, metric, force);
 
     const double max_abs = std::max(metric.cwiseAbs().maxCoeff() * 0.01, 1.0);
@@ -672,6 +568,179 @@ private:
           force);
       }
     }
+  }
+
+  void accumulate_custom_avoidance_collision(
+    const KinematicsContext & context,
+    const JointVector & qd,
+    const Eigen::Vector3d & goal,
+    const std::vector<ObstacleSphere> & obstacles,
+    Matrix6 & metric,
+    JointVector & force) const
+  {
+    const auto & params = config_.custom_avoidance;
+    if (obstacles.empty()) {
+      return;
+    }
+
+    const double influence_distance = std::max(params.metric_modulation_radius, 1e-9);
+    for (std::size_t cp_index = 0; cp_index < context.control_points.size(); ++cp_index) {
+      const auto & control_point = context.control_points[cp_index];
+      const auto & point_jacobian = context.control_point_jacobians[cp_index];
+      const Eigen::Vector3d point_velocity = point_jacobian * qd;
+      for (const auto & obstacle : obstacles) {
+        const Eigen::Vector3d delta = control_point.position - obstacle.center;
+        const double center_distance = std::max(delta.norm(), 1e-9);
+        const double clearance =
+          center_distance - (control_point.radius + obstacle.radius) - params.margin;
+        const Eigen::Vector3d n = delta / center_distance;
+        if (clearance >= influence_distance) {
+          continue;
+        }
+
+        const double clipped_clearance = std::clamp(clearance, 0.0, influence_distance);
+        const double ratio = clipped_clearance / influence_distance;
+        const double alpha = 1.0 - (ratio * ratio * (3.0 - 2.0 * ratio));
+
+        const Eigen::Vector3d escape_direction = choose_custom_avoidance_direction(
+          control_point.position,
+          control_point.radius,
+          point_velocity,
+          goal,
+          n,
+          obstacles,
+          params);
+
+        Eigen::Vector3d acceleration =
+          params.up_gain * (params.up_speed * escape_direction - point_velocity);
+        const double approaching_speed = std::max(0.0, -n.dot(point_velocity));
+        if (clearance < params.safe_distance) {
+          acceleration +=
+            params.safe_gain * (params.safe_distance - clearance) * n +
+            params.damping_gain * approaching_speed * n;
+        }
+        const double accel_norm = acceleration.norm();
+        if (accel_norm > params.max_accel && accel_norm > 1e-9) {
+          acceleration *= params.max_accel / accel_norm;
+        }
+        acceleration *= alpha;
+
+        const double x = std::max(clearance, 0.0);
+        const double metric_scalar =
+          alpha * params.metric_scalar /
+          (x / params.metric_exploder_std_dev + params.metric_exploder_eps);
+        accumulate_vector_leaf(
+          point_jacobian,
+          metric_scalar * Eigen::Matrix3d::Identity(),
+          acceleration,
+          context.control_point_curvatures[cp_index],
+          metric,
+          force);
+      }
+    }
+  }
+
+  static Eigen::Vector3d normalized_or_zero(const Eigen::Vector3d & value)
+  {
+    const double norm = value.norm();
+    if (norm <= 1e-9 || !std::isfinite(norm)) {
+      return Eigen::Vector3d::Zero();
+    }
+    return value / norm;
+  }
+
+  static double predicted_clearance_along(
+    const Eigen::Vector3d & position,
+    double point_radius,
+    const Eigen::Vector3d & direction,
+    const std::vector<ObstacleSphere> & obstacles,
+    const CollisionRmpParams & params)
+  {
+    const Eigen::Vector3d predicted =
+      position + std::max(params.candidate_lookahead, 0.0) * direction;
+    double min_clearance = std::numeric_limits<double>::infinity();
+    for (const auto & obstacle : obstacles) {
+      if (obstacle.radius <= 0.0) {
+        continue;
+      }
+      const double clearance =
+        (predicted - obstacle.center).norm() -
+        (point_radius + obstacle.radius) -
+        params.margin;
+      min_clearance = std::min(min_clearance, clearance);
+    }
+    if (!std::isfinite(min_clearance)) {
+      return params.metric_modulation_radius;
+    }
+    return min_clearance;
+  }
+
+  static Eigen::Vector3d choose_custom_avoidance_direction(
+    const Eigen::Vector3d & position,
+    double point_radius,
+    const Eigen::Vector3d & point_velocity,
+    const Eigen::Vector3d & goal,
+    const Eigen::Vector3d & away_normal,
+    const std::vector<ObstacleSphere> & obstacles,
+    const CollisionRmpParams & params)
+  {
+    const Eigen::Vector3d goal_direction =
+      normalized_or_zero(goal - position);
+    const Eigen::Vector3d velocity_direction =
+      normalized_or_zero(point_velocity);
+    const std::array<Eigen::Vector3d, 8> seeds{{
+      goal_direction,
+      velocity_direction,
+      Eigen::Vector3d::UnitZ(),
+      -Eigen::Vector3d::UnitZ(),
+      Eigen::Vector3d::UnitX(),
+      -Eigen::Vector3d::UnitX(),
+      Eigen::Vector3d::UnitY(),
+      -Eigen::Vector3d::UnitY()
+    }};
+
+    Eigen::Vector3d best_direction = Eigen::Vector3d::Zero();
+    double best_score = -std::numeric_limits<double>::infinity();
+    const double influence_distance = std::max(params.metric_modulation_radius, 1e-9);
+    for (const auto & seed : seeds) {
+      if (seed.squaredNorm() <= 1e-12) {
+        continue;
+      }
+      Eigen::Vector3d candidate = seed - away_normal * seed.dot(away_normal);
+      candidate = normalized_or_zero(candidate);
+      if (candidate.squaredNorm() <= 1e-12) {
+        continue;
+      }
+
+      const double goal_alignment =
+        goal_direction.squaredNorm() > 1e-12 ? candidate.dot(goal_direction) : 0.0;
+      const double velocity_alignment =
+        velocity_direction.squaredNorm() > 1e-12 ? candidate.dot(velocity_direction) : 0.0;
+      const double predicted_clearance = predicted_clearance_along(
+        position,
+        point_radius,
+        candidate,
+        obstacles,
+        params);
+      const double clearance_score =
+        std::clamp(predicted_clearance / influence_distance, 0.0, 1.0);
+      const double toward_penalty = std::max(0.0, -candidate.dot(away_normal));
+      const double score =
+        params.goal_weight * goal_alignment +
+        params.clearance_weight * clearance_score +
+        params.velocity_weight * velocity_alignment -
+        params.toward_penalty_weight * toward_penalty;
+
+      if (score > best_score) {
+        best_score = score;
+        best_direction = candidate;
+      }
+    }
+
+    if (best_direction.squaredNorm() > 1e-12) {
+      return best_direction;
+    }
+    return away_normal;
   }
 
   void accumulate_joint_damping(

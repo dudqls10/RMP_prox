@@ -207,6 +207,98 @@ class ExperimentGoalRunner(Node):
             "last_error_m": last_error_m,
         }
 
+    def publish_streamed_goal(
+        self,
+        frame_id: str,
+        position: List[float],
+        orientation: List[float],
+        publish_rate_hz: float,
+        activate_rmp: bool,
+        rmp_active_value: int,
+        goal_tolerance_m: float,
+        goal_settle_sec: float,
+        current_pose_timeout_sec: float,
+        stream_steps: int,
+        stream_step_distance_m: float,
+        stream_speed_m_s: float,
+        stream_orientation_mode: str,
+    ) -> Dict[str, Optional[float]]:
+        if publish_rate_hz <= 0.0:
+            raise RuntimeError("publish_rate_hz must be greater than 0.")
+
+        current_pose = self.wait_for_current_pose(current_pose_timeout_sec)
+        start_position = [
+            float(current_pose.position.x),
+            float(current_pose.position.y),
+            float(current_pose.position.z),
+        ]
+        try:
+            start_orientation = normalize_quaternion([
+                float(current_pose.orientation.x),
+                float(current_pose.orientation.y),
+                float(current_pose.orientation.z),
+                float(current_pose.orientation.w),
+            ])
+        except RuntimeError:
+            start_orientation = normalize_quaternion(orientation)
+
+        distance_m = distance_between(start_position, position)
+        if stream_steps > 0:
+            waypoint_count = stream_steps
+        else:
+            if stream_speed_m_s > 0.0:
+                step_distance_m = stream_speed_m_s / publish_rate_hz
+            else:
+                step_distance_m = stream_step_distance_m
+            waypoint_count = max(1, int(math.ceil(distance_m / max(step_distance_m, 1e-6))))
+
+        final_orientation = (
+            start_orientation
+            if stream_orientation_mode == "current"
+            else normalize_quaternion(orientation)
+        )
+
+        print(
+            "Streaming goal: "
+            f"distance={distance_m:.4f}m, waypoints={waypoint_count}, "
+            f"rate={publish_rate_hz:.1f}Hz, orientation_mode={stream_orientation_mode}"
+        )
+
+        period_sec = 1.0 / publish_rate_hz
+        stream_start = time.monotonic()
+        for index in range(1, waypoint_count + 1):
+            ratio = float(index) / float(waypoint_count)
+            waypoint_position = [
+                (1.0 - ratio) * start_position[axis] + ratio * position[axis]
+                for axis in range(3)
+            ]
+            if stream_orientation_mode == "current":
+                waypoint_orientation = start_orientation
+            elif stream_orientation_mode == "target":
+                waypoint_orientation = final_orientation
+            else:
+                waypoint_orientation = slerp_quaternion(start_orientation, orientation, ratio)
+
+            if activate_rmp:
+                self.publish_rmp_flag(rmp_active_value)
+            self.publish_goal(frame_id, waypoint_position, waypoint_orientation)
+            rclpy.spin_once(self, timeout_sec=0.0)
+            time.sleep(period_sec)
+
+        result = self.publish_until_reached(
+            frame_id=frame_id,
+            position=position,
+            orientation=final_orientation,
+            publish_rate_hz=publish_rate_hz,
+            activate_rmp=activate_rmp,
+            rmp_active_value=rmp_active_value,
+            goal_tolerance_m=goal_tolerance_m,
+            goal_settle_sec=goal_settle_sec,
+        )
+        result["streamed_waypoints"] = float(waypoint_count)
+        result["stream_elapsed_sec"] = time.monotonic() - stream_start
+        return result
+
     def spin_for_duration(self, duration_sec: float) -> None:
         deadline = time.monotonic() + max(duration_sec, 0.0)
         while time.monotonic() < deadline and rclpy.ok():
@@ -265,6 +357,52 @@ def parse_args() -> argparse.Namespace:
         "--publish-rate",
         type=float,
         help="Override goal publish rate in Hz.",
+    )
+    parser.add_argument(
+        "--stream-goal",
+        action="store_true",
+        help="Stream interpolated sub-goals from the current TCP pose to the selected goal.",
+    )
+    parser.add_argument(
+        "--stream-rate-hz",
+        type=float,
+        help=(
+            "Goal streaming rate in Hz when --stream-goal is enabled. "
+            "Defaults to the pose publish rate or --publish-rate."
+        ),
+    )
+    parser.add_argument(
+        "--stream-steps",
+        type=int,
+        default=100,
+        help=(
+            "Number of sub-goals to publish when --stream-goal is enabled. "
+            "Set 0 to compute the count from --stream-step-distance-m or --stream-speed-m-s."
+        ),
+    )
+    parser.add_argument(
+        "--stream-step-distance-m",
+        type=float,
+        default=0.01,
+        help="Sub-goal spacing in meters when --stream-goal is enabled and --stream-steps is 0.",
+    )
+    parser.add_argument(
+        "--stream-speed-m-s",
+        type=float,
+        default=0.0,
+        help=(
+            "Moving-goal speed in m/s when --stream-goal is enabled and --stream-steps is 0. "
+            "When positive, this overrides --stream-step-distance-m."
+        ),
+    )
+    parser.add_argument(
+        "--stream-orientation-mode",
+        choices=["slerp", "current", "target"],
+        default="slerp",
+        help=(
+            "Orientation used during streamed sub-goals: slerp interpolates to the target, "
+            "current keeps the starting TCP orientation, target uses the final target orientation."
+        ),
     )
     parser.add_argument(
         "--stop-publish-sec",
@@ -379,6 +517,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("--goal-settle-sec must be non-negative.")
     if args.publish_rate is not None and args.publish_rate <= 0.0:
         parser.error("--publish-rate must be greater than 0.")
+    if args.stream_steps < 0:
+        parser.error("--stream-steps must be non-negative.")
+    if args.stream_rate_hz is not None and args.stream_rate_hz <= 0.0:
+        parser.error("--stream-rate-hz must be greater than 0.")
+    if args.stream_step_distance_m <= 0.0:
+        parser.error("--stream-step-distance-m must be greater than 0.")
+    if args.stream_speed_m_s < 0.0:
+        parser.error("--stream-speed-m-s must be non-negative.")
     if args.stop_publish_sec <= 0.0:
         parser.error("--stop-publish-sec must be greater than 0.")
     if args.stop_publish_rate <= 0.0:
@@ -453,6 +599,38 @@ def normalize_quaternion(quat: List[float]) -> List[float]:
     if norm <= 1e-9:
         raise RuntimeError("Orientation quaternion norm is zero.")
     return [value / norm for value in quat]
+
+
+def slerp_quaternion(start: List[float], end: List[float], t: float) -> List[float]:
+    q0 = normalize_quaternion(start)
+    q1 = normalize_quaternion(end)
+    dot = sum(a * b for a, b in zip(q0, q1))
+    if dot < 0.0:
+        q1 = [-value for value in q1]
+        dot = -dot
+    dot = max(-1.0, min(1.0, dot))
+    t = max(0.0, min(1.0, t))
+
+    if dot > 0.9995:
+        return normalize_quaternion([
+            (1.0 - t) * q0[index] + t * q1[index]
+            for index in range(4)
+        ])
+
+    theta_0 = math.acos(dot)
+    sin_theta_0 = math.sin(theta_0)
+    theta = theta_0 * t
+    sin_theta = math.sin(theta)
+    scale_0 = math.cos(theta) - dot * sin_theta / sin_theta_0
+    scale_1 = sin_theta / sin_theta_0
+    return normalize_quaternion([
+        scale_0 * q0[index] + scale_1 * q1[index]
+        for index in range(4)
+    ])
+
+
+def distance_between(start: List[float], end: List[float]) -> float:
+    return math.sqrt(sum((float(end[index]) - float(start[index])) ** 2 for index in range(3)))
 
 
 def resolve_pose(
@@ -642,15 +820,20 @@ def stop_command(
 def print_run_result(result: Dict[str, Optional[float]]) -> None:
     last_error = result.get("last_error_m")
     elapsed = result.get("elapsed_sec")
+    stream_suffix = ""
+    streamed_waypoints = result.get("streamed_waypoints")
+    stream_elapsed = result.get("stream_elapsed_sec")
+    if streamed_waypoints is not None and stream_elapsed is not None:
+        stream_suffix = f", streamed_waypoints={streamed_waypoints:.0f}, stream_elapsed={stream_elapsed:.2f}s"
     if result.get("reached", 0.0) >= 0.5:
         print(
-            f"Reached goal: elapsed={elapsed:.2f}s, error={last_error:.4f}m"
+            f"Reached goal: elapsed={elapsed:.2f}s, error={last_error:.4f}m{stream_suffix}"
             if elapsed is not None and last_error is not None
             else "Reached goal"
         )
     else:
         print(
-            f"Goal run stopped before reaching: elapsed={elapsed:.2f}s, last_error={last_error:.4f}m"
+            f"Goal run stopped before reaching: elapsed={elapsed:.2f}s, last_error={last_error:.4f}m{stream_suffix}"
             if elapsed is not None and last_error is not None
             else "Goal run stopped before reaching"
         )
@@ -671,16 +854,34 @@ def run_pose(
         if record:
             recording_started = start_recording(node, args)
 
-        result = node.publish_until_reached(
-            frame_id=pose["frame_id"],
-            position=pose["position"],
-            orientation=pose["orientation"],
-            publish_rate_hz=pose["publish_rate_hz"],
-            activate_rmp=args.activate_rmp,
-            rmp_active_value=args.rmp_active_value,
-            goal_tolerance_m=pose["goal_tolerance_m"],
-            goal_settle_sec=pose["goal_settle_sec"],
-        )
+        if args.stream_goal:
+            stream_rate_hz = args.stream_rate_hz or pose["publish_rate_hz"]
+            result = node.publish_streamed_goal(
+                frame_id=pose["frame_id"],
+                position=pose["position"],
+                orientation=pose["orientation"],
+                publish_rate_hz=stream_rate_hz,
+                activate_rmp=args.activate_rmp,
+                rmp_active_value=args.rmp_active_value,
+                goal_tolerance_m=pose["goal_tolerance_m"],
+                goal_settle_sec=pose["goal_settle_sec"],
+                current_pose_timeout_sec=args.wait_for_current_pose,
+                stream_steps=args.stream_steps,
+                stream_step_distance_m=args.stream_step_distance_m,
+                stream_speed_m_s=args.stream_speed_m_s,
+                stream_orientation_mode=args.stream_orientation_mode,
+            )
+        else:
+            result = node.publish_until_reached(
+                frame_id=pose["frame_id"],
+                position=pose["position"],
+                orientation=pose["orientation"],
+                publish_rate_hz=pose["publish_rate_hz"],
+                activate_rmp=args.activate_rmp,
+                rmp_active_value=args.rmp_active_value,
+                goal_tolerance_m=pose["goal_tolerance_m"],
+                goal_settle_sec=pose["goal_settle_sec"],
+            )
         print_run_result(result)
 
         if record and args.post_record_sec > 0.0 and result.get("reached", 0.0) < 0.5:
@@ -719,16 +920,34 @@ def run_trajectory(
 
         for index, pose in enumerate(trajectory["poses"], start=1):
             print(f"Running [{index}/{len(trajectory['poses'])}] {pose['name']}")
-            result = node.publish_until_reached(
-                frame_id=pose["frame_id"],
-                position=pose["position"],
-                orientation=pose["orientation"],
-                publish_rate_hz=pose["publish_rate_hz"],
-                activate_rmp=args.activate_rmp,
-                rmp_active_value=args.rmp_active_value,
-                goal_tolerance_m=pose["goal_tolerance_m"],
-                goal_settle_sec=pose["goal_settle_sec"],
-            )
+            if args.stream_goal:
+                stream_rate_hz = args.stream_rate_hz or pose["publish_rate_hz"]
+                result = node.publish_streamed_goal(
+                    frame_id=pose["frame_id"],
+                    position=pose["position"],
+                    orientation=pose["orientation"],
+                    publish_rate_hz=stream_rate_hz,
+                    activate_rmp=args.activate_rmp,
+                    rmp_active_value=args.rmp_active_value,
+                    goal_tolerance_m=pose["goal_tolerance_m"],
+                    goal_settle_sec=pose["goal_settle_sec"],
+                    current_pose_timeout_sec=args.wait_for_current_pose,
+                    stream_steps=args.stream_steps,
+                    stream_step_distance_m=args.stream_step_distance_m,
+                    stream_speed_m_s=args.stream_speed_m_s,
+                    stream_orientation_mode=args.stream_orientation_mode,
+                )
+            else:
+                result = node.publish_until_reached(
+                    frame_id=pose["frame_id"],
+                    position=pose["position"],
+                    orientation=pose["orientation"],
+                    publish_rate_hz=pose["publish_rate_hz"],
+                    activate_rmp=args.activate_rmp,
+                    rmp_active_value=args.rmp_active_value,
+                    goal_tolerance_m=pose["goal_tolerance_m"],
+                    goal_settle_sec=pose["goal_settle_sec"],
+                )
             print_run_result(result)
             if trajectory["wait_sec"] > 0.0 and index < len(trajectory["poses"]):
                 node.spin_for_duration(trajectory["wait_sec"])

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -26,6 +27,11 @@ namespace rb10_rmpflow_rviz
 
 namespace
 {
+
+constexpr int kPatchMarkerIdBase = 10000;
+constexpr int kPatchMarkerIdStride = 100;
+constexpr int kMaxPatchMarkerCount = 49;
+constexpr int kFixedSurfaceCollisionMarkerIdBase = 200000;
 
 std::vector<std::string> default_range_topics()
 {
@@ -58,8 +64,20 @@ public:
     declare_parameter("fixed_frame", "base_link");
     declare_parameter("obstacle_topic", "obstacles");
     declare_parameter("publish_rate", 30.0);
+    declare_parameter("publish_collision_obstacles", true);
     declare_parameter("obstacle_radius", 0.05);
     declare_parameter("obstacle_radii", std::vector<double>{});
+    declare_parameter("surface_patch_enabled", false);
+    declare_parameter("surface_patch_rows", 5);
+    declare_parameter("surface_patch_cols", 5);
+    declare_parameter("surface_patch_spacing", 0.03);
+    declare_parameter("surface_patch_sphere_radius", 0.03);
+    declare_parameter("surface_patch_marker_lifetime", 0.25);
+    declare_parameter("surface_patch_fixed_visualization", false);
+    declare_parameter("surface_patch_visualization_topic", "proximity_surface_patches");
+    declare_parameter("surface_patch_memory_distance", 0.025);
+    declare_parameter("surface_patch_memory_max_markers", 1200);
+    declare_parameter("surface_patch_collision_memory_enabled", false);
     declare_parameter("valid_margin", 1e-3);
     declare_parameter("range_scale", 0.001);
     declare_parameter("minimum_hold_distance", 0.05);
@@ -74,7 +92,29 @@ public:
     declare_parameter("sensor_frames", default_sensor_frames());
 
     fixed_frame_ = get_parameter("fixed_frame").as_string();
+    publish_collision_obstacles_ = get_parameter("publish_collision_obstacles").as_bool();
     obstacle_radius_ = get_parameter("obstacle_radius").as_double();
+    surface_patch_enabled_ = get_parameter("surface_patch_enabled").as_bool();
+    surface_patch_rows_ = static_cast<int>(std::clamp(
+        get_parameter("surface_patch_rows").as_int(), static_cast<int64_t>(1), static_cast<int64_t>(7)));
+    surface_patch_cols_ = static_cast<int>(std::clamp(
+        get_parameter("surface_patch_cols").as_int(), static_cast<int64_t>(1), static_cast<int64_t>(7)));
+    surface_patch_spacing_ = std::max(get_parameter("surface_patch_spacing").as_double(), 0.0);
+    surface_patch_sphere_radius_ =
+      std::max(get_parameter("surface_patch_sphere_radius").as_double(), 0.0);
+    surface_patch_marker_lifetime_ =
+      std::max(get_parameter("surface_patch_marker_lifetime").as_double(), 0.0);
+    surface_patch_fixed_visualization_ =
+      get_parameter("surface_patch_fixed_visualization").as_bool();
+    surface_patch_memory_distance_ =
+      std::max(get_parameter("surface_patch_memory_distance").as_double(), 0.0);
+    surface_patch_memory_max_markers_ = static_cast<std::size_t>(
+      std::max<int64_t>(
+        get_parameter("surface_patch_memory_max_markers").as_int(),
+        0));
+    fixed_surface_patches_.reserve(surface_patch_memory_max_markers_);
+    surface_patch_collision_memory_enabled_ =
+      get_parameter("surface_patch_collision_memory_enabled").as_bool();
     valid_margin_ = get_parameter("valid_margin").as_double();
     range_scale_ = get_parameter("range_scale").as_double();
     minimum_hold_distance_ = std::max(
@@ -122,9 +162,16 @@ public:
       std::make_shared<tf2_ros::CreateTimerROS>(
         get_node_base_interface(), get_node_timers_interface()));
 
-    obstacle_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
-      get_parameter("obstacle_topic").as_string(),
-      10);
+    if (publish_collision_obstacles_) {
+      obstacle_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+        get_parameter("obstacle_topic").as_string(),
+        10);
+    }
+    if (surface_patch_fixed_visualization_) {
+      surface_patch_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+        get_parameter("surface_patch_visualization_topic").as_string(),
+        10);
+    }
 
     if (rmp_flag_gate_enabled_) {
       flag_sub_ = create_subscription<std_msgs::msg::UInt8>(
@@ -149,11 +196,21 @@ public:
   }
 
 private:
+  struct FixedSurfacePatch
+  {
+    Eigen::Vector3d center{Eigen::Vector3d::Zero()};
+    double radius{0.0};
+    std::string sensor_frame;
+  };
+
+  using SurfacePatchCenters = std::array<Eigen::Vector3d, kMaxPatchMarkerCount>;
+
   void publish_obstacles()
   {
+    const bool publish_collision_this_cycle =
+      publish_collision_obstacles_ && (!rmp_flag_gate_enabled_ || rmp_active_);
     if (rmp_flag_gate_enabled_ && !rmp_active_) {
       clear_obstacles_once();
-      return;
     }
 
     visualization_msgs::msg::MarkerArray msg;
@@ -169,15 +226,17 @@ private:
       marker.text = sensor_frames_[index];
 
       if (!range_topic_enabled(index)) {
-        marker.action = visualization_msgs::msg::Marker::DELETE;
-        msg.markers.push_back(marker);
+        if (publish_collision_this_cycle) {
+          append_delete_markers(msg, index, stamp);
+        }
         continue;
       }
 
       const auto & range_msg = latest_ranges_[index];
       if (!range_msg.has_value() || !range_is_usable(*range_msg)) {
-        marker.action = visualization_msgs::msg::Marker::DELETE;
-        msg.markers.push_back(marker);
+        if (publish_collision_this_cycle) {
+          append_delete_markers(msg, index, stamp);
+        }
         continue;
       }
 
@@ -188,32 +247,76 @@ private:
 
       const double range_m = effective_range_m(*range_msg);
       if (range_m > trigger_distances_[index]) {
-        marker.action = visualization_msgs::msg::Marker::DELETE;
-        msg.markers.push_back(marker);
+        if (publish_collision_this_cycle) {
+          append_delete_markers(msg, index, stamp);
+        }
         continue;
       }
+
+      if (surface_patch_fixed_visualization_ || surface_patch_collision_memory_enabled_) {
+        SurfacePatchCenters surface_centers;
+        const int surface_patch_count = make_surface_patch_centers(
+          index,
+          sensor_transform->first,
+          sensor_transform->second,
+          range_m,
+          0.0,
+          surface_centers);
+        remember_fixed_surface_patches(index, surface_centers, surface_patch_count);
+      }
+
+      if (!publish_collision_this_cycle) {
+        continue;
+      }
+
       const double obstacle_radius = obstacle_radii_[index];
       const Eigen::Vector3d direction = sensor_transform->second * Eigen::Vector3d::UnitX();
-      const Eigen::Vector3d center =
-        sensor_transform->first + direction * (range_m + obstacle_radius);
+      if (surface_patch_enabled_) {
+        SurfacePatchCenters patch_centers;
+        const int patch_count = make_surface_patch_centers(
+          index,
+          sensor_transform->first,
+          sensor_transform->second,
+          range_m,
+          surface_patch_radius(index),
+          patch_centers);
+        append_surface_patch_markers(
+          msg,
+          index,
+          stamp,
+          patch_centers,
+          patch_count);
+      } else {
+        const Eigen::Vector3d center =
+          sensor_transform->first + direction * (range_m + obstacle_radius);
 
-      marker.action = visualization_msgs::msg::Marker::ADD;
-      marker.pose.position.x = center.x();
-      marker.pose.position.y = center.y();
-      marker.pose.position.z = center.z();
-      marker.pose.orientation.w = 1.0;
-      marker.scale.x = obstacle_radius * 2.0;
-      marker.scale.y = obstacle_radius * 2.0;
-      marker.scale.z = obstacle_radius * 2.0;
-      marker.color.r = 1.0F;
-      marker.color.g = 0.8F;
-      marker.color.b = 0.1F;
-      marker.color.a = 0.85F;
-      msg.markers.push_back(marker);
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.pose.position.x = center.x();
+        marker.pose.position.y = center.y();
+        marker.pose.position.z = center.z();
+        marker.pose.orientation.w = 1.0;
+        marker.scale.x = obstacle_radius * 2.0;
+        marker.scale.y = obstacle_radius * 2.0;
+        marker.scale.z = obstacle_radius * 2.0;
+        marker.color.r = 1.0F;
+        marker.color.g = 0.8F;
+        marker.color.b = 0.1F;
+        marker.color.a = 0.85F;
+        set_marker_lifetime(marker);
+        msg.markers.push_back(marker);
+      }
     }
 
-    obstacle_pub_->publish(msg);
-    obstacles_cleared_for_inactive_ = false;
+    if (publish_collision_this_cycle && surface_patch_collision_memory_enabled_) {
+      append_fixed_surface_collision_markers(msg, stamp);
+    }
+    if (publish_collision_this_cycle && obstacle_pub_) {
+      obstacle_pub_->publish(msg);
+    }
+    publish_fixed_surface_patches(stamp);
+    if (publish_collision_this_cycle) {
+      obstacles_cleared_for_inactive_ = false;
+    }
   }
 
   void on_rmp_flag(const std_msgs::msg::UInt8::SharedPtr msg)
@@ -298,6 +401,271 @@ private:
     }
   }
 
+  static int patch_marker_id(std::size_t sensor_index, int patch_index)
+  {
+    return kPatchMarkerIdBase +
+           static_cast<int>(sensor_index) * kPatchMarkerIdStride +
+           patch_index;
+  }
+
+  void set_marker_lifetime(visualization_msgs::msg::Marker & marker) const
+  {
+    if (surface_patch_marker_lifetime_ <= 0.0) {
+      return;
+    }
+    const auto sec = static_cast<int32_t>(std::floor(surface_patch_marker_lifetime_));
+    const auto nanosec = static_cast<uint32_t>(
+      std::round((surface_patch_marker_lifetime_ - static_cast<double>(sec)) * 1e9));
+    marker.lifetime.sec = sec;
+    marker.lifetime.nanosec = nanosec;
+  }
+
+  visualization_msgs::msg::Marker make_delete_marker(
+    std::size_t sensor_index,
+    int id,
+    const rclcpp::Time & stamp) const
+  {
+    visualization_msgs::msg::Marker marker;
+    marker.header.frame_id = fixed_frame_;
+    marker.header.stamp = stamp;
+    marker.ns = "proximity_obstacles";
+    marker.id = id;
+    marker.type = visualization_msgs::msg::Marker::SPHERE;
+    marker.text = sensor_index < sensor_frames_.size() ? sensor_frames_[sensor_index] : "";
+    marker.action = visualization_msgs::msg::Marker::DELETE;
+    return marker;
+  }
+
+  void append_delete_markers(
+    visualization_msgs::msg::MarkerArray & msg,
+    std::size_t sensor_index,
+    const rclcpp::Time & stamp) const
+  {
+    msg.markers.push_back(make_delete_marker(
+        sensor_index,
+        static_cast<int>(sensor_index),
+        stamp));
+    for (int patch_index = 0; patch_index < kMaxPatchMarkerCount; ++patch_index) {
+      msg.markers.push_back(make_delete_marker(
+          sensor_index,
+          patch_marker_id(sensor_index, patch_index),
+          stamp));
+    }
+  }
+
+  double surface_patch_radius(std::size_t sensor_index) const
+  {
+    return surface_patch_sphere_radius_ > 0.0 ?
+           surface_patch_sphere_radius_ :
+           obstacle_radii_[sensor_index];
+  }
+
+  int make_surface_patch_centers(
+    std::size_t sensor_index,
+    const Eigen::Vector3d & sensor_position,
+    const Eigen::Matrix3d & sensor_rotation,
+    double range_m,
+    double normal_offset_m,
+    SurfacePatchCenters & centers) const
+  {
+    (void)sensor_index;
+    const int rows = std::max(surface_patch_rows_, 1);
+    const int cols = std::max(surface_patch_cols_, 1);
+    const Eigen::Vector3d normal = sensor_rotation * Eigen::Vector3d::UnitX();
+    const Eigen::Vector3d tangent_y = sensor_rotation * Eigen::Vector3d::UnitY();
+    const Eigen::Vector3d tangent_z = sensor_rotation * Eigen::Vector3d::UnitZ();
+    const Eigen::Vector3d patch_center =
+      sensor_position + normal * (range_m + normal_offset_m);
+    const double row_center = 0.5 * static_cast<double>(rows - 1);
+    const double col_center = 0.5 * static_cast<double>(cols - 1);
+
+    int patch_index = 0;
+    for (int row = 0; row < rows; ++row) {
+      for (int col = 0; col < cols; ++col) {
+        if (patch_index >= kMaxPatchMarkerCount) {
+          return patch_index;
+        }
+
+        centers[patch_index] =
+          patch_center +
+          (static_cast<double>(row) - row_center) * surface_patch_spacing_ * tangent_y +
+          (static_cast<double>(col) - col_center) * surface_patch_spacing_ * tangent_z;
+        ++patch_index;
+      }
+    }
+
+    return patch_index;
+  }
+
+  void append_surface_patch_markers(
+    visualization_msgs::msg::MarkerArray & msg,
+    std::size_t sensor_index,
+    const rclcpp::Time & stamp,
+    const SurfacePatchCenters & centers,
+    int patch_count) const
+  {
+    msg.markers.push_back(make_delete_marker(
+        sensor_index,
+        static_cast<int>(sensor_index),
+        stamp));
+
+    const double sphere_radius = surface_patch_radius(sensor_index);
+
+    int patch_index = 0;
+    for (; patch_index < patch_count; ++patch_index) {
+      const Eigen::Vector3d & center = centers[patch_index];
+      visualization_msgs::msg::Marker marker;
+      marker.header.frame_id = fixed_frame_;
+      marker.header.stamp = stamp;
+      marker.ns = "proximity_obstacles";
+      marker.id = patch_marker_id(sensor_index, patch_index);
+      marker.type = visualization_msgs::msg::Marker::SPHERE;
+      marker.text = sensor_frames_[sensor_index];
+      marker.action = visualization_msgs::msg::Marker::ADD;
+      marker.pose.position.x = center.x();
+      marker.pose.position.y = center.y();
+      marker.pose.position.z = center.z();
+      marker.pose.orientation.w = 1.0;
+      marker.scale.x = sphere_radius * 2.0;
+      marker.scale.y = sphere_radius * 2.0;
+      marker.scale.z = sphere_radius * 2.0;
+      marker.color.r = 1.0F;
+      marker.color.g = 0.55F;
+      marker.color.b = 0.05F;
+      marker.color.a = 0.72F;
+      set_marker_lifetime(marker);
+      msg.markers.push_back(marker);
+    }
+
+    for (; patch_index < kMaxPatchMarkerCount; ++patch_index) {
+      msg.markers.push_back(make_delete_marker(
+          sensor_index,
+          patch_marker_id(sensor_index, patch_index),
+          stamp));
+    }
+  }
+
+  bool fixed_surface_patch_is_new(const Eigen::Vector3d & center) const
+  {
+    if (surface_patch_memory_distance_ <= 0.0) {
+      return true;
+    }
+
+    const double min_distance_sq =
+      surface_patch_memory_distance_ * surface_patch_memory_distance_;
+    for (const auto & patch : fixed_surface_patches_) {
+      if ((patch.center - center).squaredNorm() < min_distance_sq) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void remember_fixed_surface_patches(
+    std::size_t sensor_index,
+    const SurfacePatchCenters & centers,
+    int patch_count)
+  {
+    if (
+      !(surface_patch_fixed_visualization_ || surface_patch_collision_memory_enabled_) ||
+      surface_patch_memory_max_markers_ == 0 ||
+      sensor_index >= sensor_frames_.size())
+    {
+      return;
+    }
+
+    const double sphere_radius = surface_patch_radius(sensor_index);
+    for (int patch_index = 0; patch_index < patch_count; ++patch_index) {
+      const Eigen::Vector3d & center = centers[patch_index];
+      if (!fixed_surface_patch_is_new(center)) {
+        continue;
+      }
+
+      while (fixed_surface_patches_.size() >= surface_patch_memory_max_markers_) {
+        fixed_surface_patches_.erase(fixed_surface_patches_.begin());
+      }
+
+      FixedSurfacePatch patch;
+      patch.center = center;
+      patch.radius = sphere_radius;
+      patch.sensor_frame = sensor_frames_[sensor_index];
+      fixed_surface_patches_.push_back(std::move(patch));
+    }
+  }
+
+  void publish_fixed_surface_patches(const rclcpp::Time & stamp)
+  {
+    if (!surface_patch_pub_) {
+      return;
+    }
+
+    visualization_msgs::msg::MarkerArray msg;
+    if (!fixed_surface_markers_cleared_) {
+      visualization_msgs::msg::Marker clear_marker;
+      clear_marker.header.frame_id = fixed_frame_;
+      clear_marker.header.stamp = stamp;
+      clear_marker.ns = "proximity_surface_patches";
+      clear_marker.action = visualization_msgs::msg::Marker::DELETEALL;
+      msg.markers.push_back(clear_marker);
+      fixed_surface_markers_cleared_ = true;
+    }
+
+    for (std::size_t index = 0; index < fixed_surface_patches_.size(); ++index) {
+      const auto & patch = fixed_surface_patches_[index];
+      visualization_msgs::msg::Marker marker;
+      marker.header.frame_id = fixed_frame_;
+      marker.header.stamp = stamp;
+      marker.ns = "proximity_surface_patches";
+      marker.id = static_cast<int32_t>(index);
+      marker.type = visualization_msgs::msg::Marker::SPHERE;
+      marker.text = patch.sensor_frame;
+      marker.action = visualization_msgs::msg::Marker::ADD;
+      marker.pose.position.x = patch.center.x();
+      marker.pose.position.y = patch.center.y();
+      marker.pose.position.z = patch.center.z();
+      marker.pose.orientation.w = 1.0;
+      marker.scale.x = patch.radius * 2.0;
+      marker.scale.y = patch.radius * 2.0;
+      marker.scale.z = patch.radius * 2.0;
+      marker.color.r = 0.05F;
+      marker.color.g = 0.75F;
+      marker.color.b = 1.0F;
+      marker.color.a = 0.55F;
+      msg.markers.push_back(marker);
+    }
+
+    surface_patch_pub_->publish(msg);
+  }
+
+  void append_fixed_surface_collision_markers(
+    visualization_msgs::msg::MarkerArray & msg,
+    const rclcpp::Time & stamp) const
+  {
+    for (std::size_t index = 0; index < fixed_surface_patches_.size(); ++index) {
+      const auto & patch = fixed_surface_patches_[index];
+      visualization_msgs::msg::Marker marker;
+      marker.header.frame_id = fixed_frame_;
+      marker.header.stamp = stamp;
+      marker.ns = "proximity_obstacles";
+      marker.id = kFixedSurfaceCollisionMarkerIdBase + static_cast<int32_t>(index);
+      marker.type = visualization_msgs::msg::Marker::SPHERE;
+      marker.text = patch.sensor_frame;
+      marker.action = visualization_msgs::msg::Marker::ADD;
+      marker.pose.position.x = patch.center.x();
+      marker.pose.position.y = patch.center.y();
+      marker.pose.position.z = patch.center.z();
+      marker.pose.orientation.w = 1.0;
+      marker.scale.x = patch.radius * 2.0;
+      marker.scale.y = patch.radius * 2.0;
+      marker.scale.z = patch.radius * 2.0;
+      marker.color.r = 0.05F;
+      marker.color.g = 0.75F;
+      marker.color.b = 1.0F;
+      marker.color.a = 0.55F;
+      msg.markers.push_back(marker);
+    }
+  }
+
   bool range_topic_enabled(std::size_t index) const
   {
     if (index >= range_topics_.size()) {
@@ -328,7 +696,7 @@ private:
 
   void clear_obstacles_once()
   {
-    if (obstacles_cleared_for_inactive_) {
+    if (!obstacle_pub_ || obstacles_cleared_for_inactive_) {
       return;
     }
 
@@ -389,7 +757,19 @@ private:
   }
 
   std::string fixed_frame_;
+  bool publish_collision_obstacles_{true};
   double obstacle_radius_{0.05};
+  bool surface_patch_enabled_{false};
+  int surface_patch_rows_{5};
+  int surface_patch_cols_{5};
+  double surface_patch_spacing_{0.03};
+  double surface_patch_sphere_radius_{0.03};
+  double surface_patch_marker_lifetime_{0.25};
+  bool surface_patch_fixed_visualization_{false};
+  bool surface_patch_collision_memory_enabled_{false};
+  bool fixed_surface_markers_cleared_{false};
+  double surface_patch_memory_distance_{0.025};
+  std::size_t surface_patch_memory_max_markers_{1200};
   double valid_margin_{1e-3};
   double range_scale_{0.001};
   double minimum_hold_distance_{0.05};
@@ -405,6 +785,7 @@ private:
   std::vector<double> obstacle_radii_;
   std::vector<double> trigger_distances_;
   std::vector<std::optional<sensor_msgs::msg::Range>> latest_ranges_;
+  std::vector<FixedSurfacePatch> fixed_surface_patches_;
 
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
@@ -412,6 +793,7 @@ private:
   std::vector<rclcpp::Subscription<sensor_msgs::msg::Range>::SharedPtr> range_subs_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameters_callback_handle_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr obstacle_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr surface_patch_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

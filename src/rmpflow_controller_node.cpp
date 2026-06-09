@@ -32,7 +32,6 @@
 #include "realtime_tools/realtime_buffer.hpp"
 #include "realtime_tools/realtime_publisher.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
-#include "sensor_msgs/msg/range.hpp"
 #include "std_msgs/msg/color_rgba.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "std_msgs/msg/u_int8.hpp"
@@ -57,16 +56,6 @@ using Float64ArrayRtPublisher =
   realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>;
 using PoseRtPublisher = realtime_tools::RealtimePublisher<geometry_msgs::msg::Pose>;
 constexpr double kPi = 3.14159265358979323846;
-
-std::vector<std::string> default_wall_following_range_topics()
-{
-  std::vector<std::string> topics;
-  topics.reserve(RB10Model::sensor_control_points.size());
-  for (std::size_t index = 0; index < RB10Model::sensor_control_points.size(); ++index) {
-    topics.emplace_back("proximity_distance" + std::to_string(index + 1));
-  }
-  return topics;
-}
 
 double degrees_to_radians(double degrees)
 {
@@ -1066,9 +1055,14 @@ public:
     declare_parameter("target_q_topic", "/target_q");
     declare_parameter("publish_target_metric", false);
     declare_parameter("target_metric_topic", "/target_metric");
+    declare_parameter("publish_rmp_accel_debug", true);
+    declare_parameter("rmp_joint_accel_topic", "/rmp_joint_accel");
+    declare_parameter("rmp_tcp_accel_topic", "/rmp_tcp_accel");
     declare_parameter("publish_joint_states", true);
+    declare_parameter("joint_state_publish_topic", "joint_states");
     declare_parameter("publish_visualization", true);
     declare_parameter("publish_repulsion_metric_markers", true);
+    declare_parameter("control_point_marker_diameter", 0.10);
     declare_parameter("repulsion_metric_marker_topic", "repulsion_metric_markers");
     declare_parameter("repulsion_metric_marker_min_norm", 0.01);
     declare_parameter("repulsion_metric_marker_dot_diameter", 0.04);
@@ -1160,7 +1154,7 @@ public:
     declare_parameter("wrist_axis_target_rmp_metric_scalar", 1000.0);
     declare_parameter("wrist_axis_target_rmp_proximity_metric_boost_scalar", 1.0);
     declare_parameter("wrist_axis_target_rmp_proximity_metric_boost_length_scale", 0.01);
-    declare_parameter("collision_policy", "wall_following");
+    declare_parameter("collision_policy", "repulsive");
     declare_parameter("collision_rmp_margin", 0.0);
     declare_parameter("collision_rmp_damping_gain", 50.0);
     declare_parameter("collision_rmp_damping_std_dev", 0.04);
@@ -1172,32 +1166,22 @@ public:
     declare_parameter("collision_rmp_metric_scalar", 1.0);
     declare_parameter("collision_rmp_metric_exploder_std_dev", 0.02);
     declare_parameter("collision_rmp_metric_exploder_eps", 0.001);
-    declare_parameter("d_safe", 0.10);
-    declare_parameter("d_ref", 0.15);
-    declare_parameter("d_on", 0.22);
-    declare_parameter("d_off", 0.30);
-    declare_parameter("kappa_sigma", 1.0);
-    declare_parameter("gamma_cbf", 2.0);
-    declare_parameter("k_dist", 1.0);
-    declare_parameter("k_vel", 4.0);
-    declare_parameter("k_safe_0", 8.0);
-    declare_parameter("k_safe_1", 4.0);
-    declare_parameter("v_t_max", 0.10);
-    declare_parameter("v_n_toward_max", 0.03);
-    declare_parameter("v_n_away_max", 0.10);
-    declare_parameter("a_safe_max", 0.50);
-    declare_parameter("m_t", 1.0);
-    declare_parameter("m_n", 5.0);
-    declare_parameter("m_max", 50.0);
-    declare_parameter("direction_lock_time", 1.0);
-    declare_parameter("wall_following_normal_points_toward_obstacle", true);
-    declare_parameter("wall_following_nominal_velocity_dt", 0.01);
-    declare_parameter("wall_following_derivative_filter_alpha", 0.35);
-    declare_parameter("wall_following_range_topics", default_wall_following_range_topics());
-    declare_parameter("wall_following_sensor_enabled", std::vector<bool>{});
-    declare_parameter("wall_following_range_scale", 0.001);
-    declare_parameter("wall_following_minimum_hold_distance", 0.05);
-    declare_parameter("wall_following_valid_margin", 1e-3);
+    declare_parameter("custom_avoidance_rmp_margin", 0.0);
+    declare_parameter("custom_avoidance_rmp_influence_distance", 0.3);
+    declare_parameter("custom_avoidance_rmp_metric_scalar", 1.0);
+    declare_parameter("custom_avoidance_rmp_metric_exploder_std_dev", 0.02);
+    declare_parameter("custom_avoidance_rmp_metric_exploder_eps", 0.001);
+    declare_parameter("custom_avoidance_rmp_up_speed", 0.08);
+    declare_parameter("custom_avoidance_rmp_up_gain", 4.0);
+    declare_parameter("custom_avoidance_rmp_safe_distance", 0.10);
+    declare_parameter("custom_avoidance_rmp_safe_gain", 5.0);
+    declare_parameter("custom_avoidance_rmp_normal_damping_gain", 50.0);
+    declare_parameter("custom_avoidance_rmp_max_accel", 2.0);
+    declare_parameter("custom_avoidance_rmp_candidate_lookahead", 0.08);
+    declare_parameter("custom_avoidance_rmp_goal_weight", 1.0);
+    declare_parameter("custom_avoidance_rmp_clearance_weight", 1.0);
+    declare_parameter("custom_avoidance_rmp_velocity_weight", 0.25);
+    declare_parameter("custom_avoidance_rmp_toward_penalty_weight", 2.0);
     declare_parameter("damping_rmp_accel_d_gain", 30.0);
     declare_parameter("damping_rmp_metric_scalar", 0.005);
     declare_parameter("damping_rmp_inertia", 0.3);
@@ -1267,28 +1251,21 @@ public:
     obstacles_box_.set(std::vector<ObstacleSphere>{ObstacleSphere{}});
     proximity_sensor_obstacles_box_.set(
       std::vector<std::optional<ObstacleSphere>>(RB10Model::sensor_control_points.size()));
-    wall_following_proximity_box_.set(
-      std::vector<SectorProximityData>(default_sector_wall_modules().size()));
     tcp_accel_visualization_box_.set(TcpAccelerationSample{});
     const auto solver_config = build_solver_config();
     target_metric_params_ = solver_config.target;
-    collision_metric_params_ = solver_config.collision;
+    collision_metric_params_ = solver_config.collision.policy == "custom_avoidance" ?
+      solver_config.custom_avoidance : solver_config.collision;
     configure_external_rmp_inputs(solver_config.graph_nodes);
     solver_ = build_solver(solver_config);
     body_obstacles_visual_ = solver_config.body_obstacles;
-    wall_following_range_scale_ = get_parameter("wall_following_range_scale").as_double();
-    wall_following_minimum_hold_distance_ =
-      std::max(0.0, get_parameter("wall_following_minimum_hold_distance").as_double());
-    wall_following_valid_margin_ =
-      std::max(0.0, get_parameter("wall_following_valid_margin").as_double());
-    if (solver_config.collision.policy == "wall_following") {
-      configure_wall_following_range_inputs();
-    }
 
     publish_joint_states_enabled_ = get_parameter("publish_joint_states").as_bool();
     publish_visualization_enabled_ = get_parameter("publish_visualization").as_bool();
     publish_repulsion_metric_markers_enabled_ =
       get_parameter("publish_repulsion_metric_markers").as_bool();
+    control_point_marker_diameter_ =
+      get_parameter("control_point_marker_diameter").as_double();
     repulsion_metric_marker_min_norm_ = std::clamp(
       get_parameter("repulsion_metric_marker_min_norm").as_double(), 0.0, 1.0);
     repulsion_metric_marker_dot_diameter_ = std::max(
@@ -1310,7 +1287,9 @@ public:
     rmp_active_flag_value_ = static_cast<int>(get_parameter("rmp_active_flag_value").as_int());
     rmp_active_.store(!rmp_flag_gate_enabled_);
     if (publish_joint_states_enabled_) {
-      joint_state_pub_ = create_publisher<sensor_msgs::msg::JointState>("joint_states", 10);
+      joint_state_pub_ = create_publisher<sensor_msgs::msg::JointState>(
+        get_parameter("joint_state_publish_topic").as_string(),
+        10);
       rt_joint_state_pub_ = std::make_shared<JointStateRtPublisher>(joint_state_pub_);
     }
     if (get_parameter("backend_mode").as_string() == "rb10_direct_api") {
@@ -1333,6 +1312,14 @@ public:
       target_metric_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
         get_parameter("target_metric_topic").as_string(), 10);
       rt_target_metric_pub_ = std::make_shared<Float64ArrayRtPublisher>(target_metric_pub_);
+    }
+    if (get_parameter("publish_rmp_accel_debug").as_bool()) {
+      rmp_joint_accel_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
+        get_parameter("rmp_joint_accel_topic").as_string(), 10);
+      rt_rmp_joint_accel_pub_ = std::make_shared<Float64ArrayRtPublisher>(rmp_joint_accel_pub_);
+      rmp_tcp_accel_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
+        get_parameter("rmp_tcp_accel_topic").as_string(), 10);
+      rt_rmp_tcp_accel_pub_ = std::make_shared<Float64ArrayRtPublisher>(rmp_tcp_accel_pub_);
     }
     if (publish_visualization_enabled_) {
       goal_marker_pub_ = create_publisher<visualization_msgs::msg::Marker>("goal_marker", 10);
@@ -1483,12 +1470,16 @@ private:
   void on_rmp_flag(const std_msgs::msg::UInt8::SharedPtr msg)
   {
     const bool requested_active = static_cast<int>(msg->data) == rmp_active_flag_value_;
+    const bool was_active = rmp_active_.exchange(requested_active);
+    if (was_active == requested_active) {
+      return;
+    }
+
     RCLCPP_INFO(
       get_logger(),
       "Received controller /RMP_flag: %d -> active=%s",
       static_cast<int>(msg->data),
       requested_active ? "true" : "false");
-    rmp_active_.store(requested_active);
     if (!requested_active) {
       virtual_velocity_state_initialized_ = false;
       last_safe_command_state_initialized_ = false;
@@ -1552,14 +1543,41 @@ private:
       if (marker.action != visualization_msgs::msg::Marker::ADD) {
         continue;
       }
-      ObstacleSphere obstacle{
-        Eigen::Vector3d(
-          marker.pose.position.x,
-          marker.pose.position.y,
-          marker.pose.position.z),
-        marker.scale.x * 0.5
-      };
-      obstacles.push_back(obstacle);
+      const Eigen::Vector3d marker_center(
+        marker.pose.position.x,
+        marker.pose.position.y,
+        marker.pose.position.z);
+      const double obstacle_radius = 0.5 * std::max(marker.scale.x, marker.scale.y);
+      ObstacleSphere obstacle{marker_center, obstacle_radius};
+
+      if (
+        marker.type == visualization_msgs::msg::Marker::CYLINDER &&
+        marker.scale.z > obstacle_radius * 2.0)
+      {
+        Eigen::Quaterniond orientation(
+          marker.pose.orientation.w,
+          marker.pose.orientation.x,
+          marker.pose.orientation.y,
+          marker.pose.orientation.z);
+        if (orientation.norm() <= 1e-9) {
+          orientation = Eigen::Quaterniond::Identity();
+        }
+        const Eigen::Vector3d cylinder_axis =
+          orientation.normalized().toRotationMatrix() * Eigen::Vector3d::UnitZ();
+        const double height = std::max(marker.scale.z, 0.0);
+        const double spacing = std::max(obstacle_radius, 0.02);
+        const int sphere_count =
+          std::clamp(static_cast<int>(std::ceil(height / spacing)) + 1, 2, 64);
+        const double step = height / static_cast<double>(sphere_count - 1);
+        for (int index = 0; index < sphere_count; ++index) {
+          const double offset = -0.5 * height + step * static_cast<double>(index);
+          obstacles.push_back(ObstacleSphere{
+              marker_center + offset * cylinder_axis,
+              obstacle_radius});
+        }
+      } else {
+        obstacles.push_back(obstacle);
+      }
       if (proximity_control_point_index.has_value()) {
         proximity_sensor_obstacles[proximity_control_point_index.value()] = obstacle;
       }
@@ -1588,112 +1606,6 @@ private:
     }
 
     return std::nullopt;
-  }
-
-  std::optional<std::pair<std::size_t, std::size_t>> wall_following_sector_for_control_point(
-    std::size_t control_point_index) const
-  {
-    const auto & modules = default_sector_wall_modules();
-    for (std::size_t module_index = 0; module_index < modules.size(); ++module_index) {
-      const auto & module = modules[module_index];
-      for (std::size_t sector = 0; sector < module.control_point_indices.size(); ++sector) {
-        if (module.control_point_indices[sector] == control_point_index) {
-          return std::make_pair(module_index, sector);
-        }
-      }
-    }
-    return std::nullopt;
-  }
-
-  void configure_wall_following_range_inputs()
-  {
-    const auto range_topics = get_parameter("wall_following_range_topics").as_string_array();
-    auto sensor_enabled = get_parameter("wall_following_sensor_enabled").as_bool_array();
-    if (range_topics.size() != RB10Model::sensor_control_points.size()) {
-      throw std::runtime_error(
-              "wall_following_range_topics must match RB10 sensor control point count");
-    }
-    if (sensor_enabled.empty()) {
-      sensor_enabled.assign(range_topics.size(), true);
-    }
-    if (sensor_enabled.size() != range_topics.size()) {
-      throw std::runtime_error(
-              "wall_following_sensor_enabled must be empty or match wall_following_range_topics");
-    }
-
-    wall_following_range_subs_.clear();
-    wall_following_range_subs_.reserve(range_topics.size());
-    for (std::size_t control_point_index = 0; control_point_index < range_topics.size();
-      ++control_point_index)
-    {
-      if (!sensor_enabled[control_point_index]) {
-        continue;
-      }
-      const auto mapping = wall_following_sector_for_control_point(control_point_index);
-      if (!mapping.has_value()) {
-        continue;
-      }
-      wall_following_range_subs_.push_back(create_subscription<sensor_msgs::msg::Range>(
-          range_topics[control_point_index],
-          10,
-          [this, module_index = mapping->first, sector = mapping->second](
-            const sensor_msgs::msg::Range::SharedPtr msg)
-          {
-            on_wall_following_range(module_index, sector, *msg);
-          }));
-    }
-  }
-
-  bool wall_following_range_is_usable(const sensor_msgs::msg::Range & msg) const
-  {
-    if (!std::isfinite(msg.range)) {
-      return false;
-    }
-    if (msg.range < 0.0) {
-      return false;
-    }
-    return msg.range < (msg.max_range - wall_following_valid_margin_);
-  }
-
-  double wall_following_effective_range_m(const sensor_msgs::msg::Range & msg) const
-  {
-    return std::max(msg.range * wall_following_range_scale_, wall_following_minimum_hold_distance_);
-  }
-
-  void on_wall_following_range(
-    std::size_t module_index,
-    std::size_t sector,
-    const sensor_msgs::msg::Range & msg)
-  {
-    std::vector<SectorProximityData> proximity;
-    wall_following_proximity_box_.get(proximity);
-    if (proximity.size() != default_sector_wall_modules().size()) {
-      proximity.assign(default_sector_wall_modules().size(), SectorProximityData{});
-    }
-    if (
-      module_index >= proximity.size() ||
-      sector >= kWallFollowingSectorCount)
-    {
-      return;
-    }
-
-    auto & module = proximity[module_index];
-    module.enabled = true;
-    double stamp_sec = rclcpp::Time(msg.header.stamp).seconds();
-    if (stamp_sec <= 0.0) {
-      stamp_sec = now().seconds();
-    }
-    module.stamp_sec = stamp_sec;
-    module.has_sigma[sector] = false;
-    module.sigmas[sector] = 0.0;
-    if (wall_following_range_is_usable(msg)) {
-      module.distances[sector] = wall_following_effective_range_m(msg);
-      module.valid[sector] = true;
-    } else {
-      module.distances[sector] = std::numeric_limits<double>::infinity();
-      module.valid[sector] = false;
-    }
-    wall_following_proximity_box_.set(proximity);
   }
 
   EigenRmpConfig build_solver_config() const
@@ -1804,33 +1716,39 @@ private:
     config.collision.metric_exploder_eps =
       get_parameter("collision_rmp_metric_exploder_eps").as_double();
 
-    config.wall_following_collision.d_safe = get_parameter("d_safe").as_double();
-    config.wall_following_collision.d_ref = get_parameter("d_ref").as_double();
-    config.wall_following_collision.d_on = get_parameter("d_on").as_double();
-    config.wall_following_collision.d_off = get_parameter("d_off").as_double();
-    config.wall_following_collision.kappa_sigma = get_parameter("kappa_sigma").as_double();
-    config.wall_following_collision.gamma_cbf = get_parameter("gamma_cbf").as_double();
-    config.wall_following_collision.k_dist = get_parameter("k_dist").as_double();
-    config.wall_following_collision.k_vel = get_parameter("k_vel").as_double();
-    config.wall_following_collision.k_safe_0 = get_parameter("k_safe_0").as_double();
-    config.wall_following_collision.k_safe_1 = get_parameter("k_safe_1").as_double();
-    config.wall_following_collision.v_t_max = get_parameter("v_t_max").as_double();
-    config.wall_following_collision.v_n_toward_max =
-      get_parameter("v_n_toward_max").as_double();
-    config.wall_following_collision.v_n_away_max =
-      get_parameter("v_n_away_max").as_double();
-    config.wall_following_collision.a_safe_max = get_parameter("a_safe_max").as_double();
-    config.wall_following_collision.m_t = get_parameter("m_t").as_double();
-    config.wall_following_collision.m_n = get_parameter("m_n").as_double();
-    config.wall_following_collision.m_max = get_parameter("m_max").as_double();
-    config.wall_following_collision.direction_lock_time =
-      get_parameter("direction_lock_time").as_double();
-    config.wall_following_collision.normal_points_toward_obstacle =
-      get_parameter("wall_following_normal_points_toward_obstacle").as_bool();
-    config.wall_following_collision.nominal_velocity_dt =
-      get_parameter("wall_following_nominal_velocity_dt").as_double();
-    config.wall_following_collision.derivative_filter_alpha =
-      get_parameter("wall_following_derivative_filter_alpha").as_double();
+    config.custom_avoidance.policy = "custom_avoidance";
+    config.custom_avoidance.margin =
+      get_parameter("custom_avoidance_rmp_margin").as_double();
+    config.custom_avoidance.damping_gain =
+      get_parameter("custom_avoidance_rmp_normal_damping_gain").as_double();
+    config.custom_avoidance.metric_modulation_radius =
+      get_parameter("custom_avoidance_rmp_influence_distance").as_double();
+    config.custom_avoidance.metric_scalar =
+      get_parameter("custom_avoidance_rmp_metric_scalar").as_double();
+    config.custom_avoidance.metric_exploder_std_dev =
+      get_parameter("custom_avoidance_rmp_metric_exploder_std_dev").as_double();
+    config.custom_avoidance.metric_exploder_eps =
+      get_parameter("custom_avoidance_rmp_metric_exploder_eps").as_double();
+    config.custom_avoidance.up_speed =
+      get_parameter("custom_avoidance_rmp_up_speed").as_double();
+    config.custom_avoidance.up_gain =
+      get_parameter("custom_avoidance_rmp_up_gain").as_double();
+    config.custom_avoidance.safe_distance =
+      get_parameter("custom_avoidance_rmp_safe_distance").as_double();
+    config.custom_avoidance.safe_gain =
+      get_parameter("custom_avoidance_rmp_safe_gain").as_double();
+    config.custom_avoidance.max_accel =
+      get_parameter("custom_avoidance_rmp_max_accel").as_double();
+    config.custom_avoidance.candidate_lookahead =
+      get_parameter("custom_avoidance_rmp_candidate_lookahead").as_double();
+    config.custom_avoidance.goal_weight =
+      get_parameter("custom_avoidance_rmp_goal_weight").as_double();
+    config.custom_avoidance.clearance_weight =
+      get_parameter("custom_avoidance_rmp_clearance_weight").as_double();
+    config.custom_avoidance.velocity_weight =
+      get_parameter("custom_avoidance_rmp_velocity_weight").as_double();
+    config.custom_avoidance.toward_penalty_weight =
+      get_parameter("custom_avoidance_rmp_toward_penalty_weight").as_double();
 
     config.damping.accel_d_gain = get_parameter("damping_rmp_accel_d_gain").as_double();
     config.damping.metric_scalar = get_parameter("damping_rmp_metric_scalar").as_double();
@@ -2567,6 +2485,34 @@ private:
     tcp_accel_visualization_box_.set(sample);
   }
 
+  void publish_rmp_accel_debug(
+    const RobotState & state,
+    const JointVector & qdd)
+  {
+    if (rmp_joint_accel_pub_) {
+      std_msgs::msg::Float64MultiArray msg;
+      msg.data.assign(qdd.data(), qdd.data() + qdd.size());
+      if (rt_rmp_joint_accel_pub_) {
+        rt_rmp_joint_accel_pub_->tryPublish(msg);
+      } else {
+        rmp_joint_accel_pub_->publish(msg);
+      }
+    }
+
+    if (rmp_tcp_accel_pub_) {
+      const auto context = RB10Model::forward_context(state.q);
+      const Eigen::Vector3d tcp_accel = context.tcp_jacobian * qdd + context.tcp_curvature;
+
+      std_msgs::msg::Float64MultiArray msg;
+      msg.data = {tcp_accel.x(), tcp_accel.y(), tcp_accel.z()};
+      if (rt_rmp_tcp_accel_pub_) {
+        rt_rmp_tcp_accel_pub_->tryPublish(msg);
+      } else {
+        rmp_tcp_accel_pub_->publish(msg);
+      }
+    }
+  }
+
   void clear_tcp_accel_visualization_sample()
   {
     tcp_accel_visualization_box_.set(TcpAccelerationSample{});
@@ -2629,8 +2575,7 @@ private:
     const RobotState & state,
     const Eigen::Vector3d & goal,
     const Eigen::Quaterniond & goal_orientation,
-    const std::vector<ObstacleSphere> & obstacles,
-    const std::vector<SectorProximityData> & sector_proximity) const
+    const std::vector<ObstacleSphere> & obstacles) const
   {
     std::unordered_map<std::string, Eigen::Vector3d> vector_targets;
     vector_targets.emplace("goal", goal);
@@ -2657,7 +2602,6 @@ private:
       state.qd,
       vector_targets,
       obstacles,
-      sector_proximity,
       external_rmps);
     JointVector qdd = solution.qdd;
     for (int index = 0; index < qdd.size(); ++index) {
@@ -3064,13 +3008,11 @@ private:
       Eigen::Vector3d goal;
       Eigen::Quaterniond goal_orientation;
       std::vector<ObstacleSphere> obstacles;
-      std::vector<SectorProximityData> sector_proximity;
       GoalTarget goal_target;
       goal_target_box_.get(goal_target);
       goal = goal_target.position;
       goal_orientation = goal_target.orientation;
       obstacles_box_.get(obstacles);
-      wall_following_proximity_box_.get(sector_proximity);
 
       JointVector qdd = JointVector::Zero();
       last_min_z_safety_triggered_.store(false);
@@ -3079,8 +3021,7 @@ private:
           control_state,
           goal,
           goal_orientation,
-          obstacles,
-          sector_proximity);
+          obstacles);
       } catch (const std::exception & error) {
         RCLCPP_ERROR_THROTTLE(
           get_logger(),
@@ -3090,6 +3031,7 @@ private:
           error.what());
       }
       update_tcp_accel_visualization(control_state, qdd);
+      publish_rmp_accel_debug(control_state, qdd);
       RobotState predicted_state = integrate_command(control_state, qdd, period.count());
       const auto predicted_context = RB10Model::forward_context(predicted_state.q);
       RobotState command_state = predicted_state;
@@ -3289,9 +3231,12 @@ private:
       marker.pose.position.y = context.control_points[index].position.y();
       marker.pose.position.z = context.control_points[index].position.z();
       marker.pose.orientation.w = 1.0;
-      marker.scale.x = context.control_points[index].radius * 2.0;
-      marker.scale.y = context.control_points[index].radius * 2.0;
-      marker.scale.z = context.control_points[index].radius * 2.0;
+      const double marker_diameter = control_point_marker_diameter_ > 0.0 ?
+        control_point_marker_diameter_ :
+        context.control_points[index].radius * 2.0;
+      marker.scale.x = marker_diameter;
+      marker.scale.y = marker_diameter;
+      marker.scale.z = marker_diameter;
       marker.color.r = 0.0F;
       marker.color.g = 0.5F;
       marker.color.b = 1.0F;
@@ -3431,7 +3376,6 @@ private:
   realtime_tools::RealtimeBox<std::vector<ObstacleSphere>> obstacles_box_;
   realtime_tools::RealtimeBox<std::vector<std::optional<ObstacleSphere>>>
   proximity_sensor_obstacles_box_;
-  realtime_tools::RealtimeBox<std::vector<SectorProximityData>> wall_following_proximity_box_;
   realtime_tools::RealtimeBox<TcpAccelerationSample> tcp_accel_visualization_box_;
   std::vector<BodyObstacle> body_obstacles_visual_;
   std::atomic<bool> last_min_z_safety_triggered_{false};
@@ -3446,6 +3390,7 @@ private:
   bool publish_tcp_accel_marker_enabled_{true};
   bool publish_rmp_ee_pose_enabled_{true};
   bool publish_goal_tf_enabled_{true};
+  double control_point_marker_diameter_{0.10};
   std::string joint_state_topic_{"joint_states"};
   std::string goal_tf_parent_frame_{"base_link"};
   std::string goal_tf_child_frame_{"rmp_goal_target"};
@@ -3475,9 +3420,6 @@ private:
   double tcp_accel_marker_max_length_{0.15};
   double tcp_accel_marker_norm_for_max_length_{2.0};
   double tcp_accel_marker_min_norm_{0.001};
-  double wall_following_range_scale_{0.001};
-  double wall_following_minimum_hold_distance_{0.05};
-  double wall_following_valid_margin_{1e-3};
   int rmp_active_flag_value_{1};
   std::atomic<bool> rmp_active_{true};
 
@@ -3486,6 +3428,8 @@ private:
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr position_command_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr target_q_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr target_metric_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr rmp_joint_accel_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr rmp_tcp_accel_pub_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr goal_marker_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr control_point_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr body_obstacle_pub_;
@@ -3500,13 +3444,13 @@ private:
   std::shared_ptr<Float64ArrayRtPublisher> rt_position_command_pub_;
   std::shared_ptr<Float64ArrayRtPublisher> rt_target_q_pub_;
   std::shared_ptr<Float64ArrayRtPublisher> rt_target_metric_pub_;
+  std::shared_ptr<Float64ArrayRtPublisher> rt_rmp_joint_accel_pub_;
+  std::shared_ptr<Float64ArrayRtPublisher> rt_rmp_tcp_accel_pub_;
   std::shared_ptr<PoseRtPublisher> rt_rmp_eef_pose_pub_;
   rclcpp::Subscription<geometry_msgs::msg::Point>::SharedPtr goal_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_sub_;
   rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr rmp_flag_sub_;
   rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr obstacle_sub_;
-  std::vector<rclcpp::Subscription<sensor_msgs::msg::Range>::SharedPtr>
-  wall_following_range_subs_;
   std::vector<rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr> external_metric_subs_;
   std::vector<rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr> external_accel_subs_;
   rclcpp::TimerBase::SharedPtr visualization_timer_;

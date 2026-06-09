@@ -18,7 +18,6 @@ struct LearningObservation
   RB10Model::JointVector qd{RB10Model::JointVector::Zero()};
   std::unordered_map<std::string, Eigen::Vector3d> vector_targets;
   std::vector<ObstacleSphere> obstacles;
-  std::vector<SectorProximityData> sector_proximity;
 };
 
 struct ExternalFeatureSpec

@@ -9,7 +9,6 @@
 
 #include "rb10_rmpflow_rviz/pinocchio_model.hpp"
 #include "rb10_rmpflow_rviz/rmp_solver_interface.hpp"
-#include "rb10_rmpflow_rviz/sector_wall_following_collision_rmp.hpp"
 
 namespace rb10_rmpflow_rviz
 {
@@ -28,7 +27,6 @@ public:
     const JointVector & qd,
     const std::unordered_map<std::string, Eigen::Vector3d> & vector_targets,
     const std::vector<ObstacleSphere> & obstacles,
-    const std::vector<SectorProximityData> & sector_proximity = {},
     const std::unordered_map<std::string, ExternalRmpFeature> & external_rmps = {}) const override;
 
   std::vector<RmpSolveResult> solve_batch(
@@ -142,12 +140,10 @@ private:
     Matrix6 & metric,
     JointVector & force) const;
 
-  void accumulate_wall_following_collision(
+  void accumulate_custom_avoidance_collision(
     const NodeGeometry & control_point_geometry,
-    const KinematicsContext & context,
-    const JointVector & qd,
-    const JointVector & nominal_qd_without_collision,
-    const std::vector<SectorProximityData> & sector_proximity,
+    const Eigen::Vector3d & goal,
+    const std::vector<ObstacleSphere> & obstacles,
     Matrix6 & metric,
     JointVector & force) const;
 
@@ -176,7 +172,6 @@ private:
   EigenRmpConfig config_;
   std::shared_ptr<const PinocchioModel> model_;
   std::shared_ptr<const void> compiled_state_;
-  mutable std::vector<SectorWallFollowingCollisionRMP::State> wall_following_states_;
 };
 
 }  // namespace rb10_rmpflow_rviz

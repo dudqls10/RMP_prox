@@ -38,6 +38,7 @@ def generate_launch_description():
     real_joint_state_source = LaunchConfiguration("real_joint_state_source")
     raw_joint_state_topic = LaunchConfiguration("raw_joint_state_topic")
     normalized_joint_state_topic = LaunchConfiguration("normalized_joint_state_topic")
+    robot_description_topic = LaunchConfiguration("robot_description_topic")
     start_local_robot_state_publisher = LaunchConfiguration("start_local_robot_state_publisher")
     publish_debug_joint_state_sources = LaunchConfiguration("publish_debug_joint_state_sources")
     start_api_bridge = LaunchConfiguration("start_api_bridge")
@@ -45,6 +46,11 @@ def generate_launch_description():
     use_interactive_goal = LaunchConfiguration("use_interactive_goal")
     use_obstacles = LaunchConfiguration("use_obstacles")
     use_proximity_bridge = LaunchConfiguration("use_proximity_bridge")
+    proximity_surface_visualization = LaunchConfiguration("proximity_surface_visualization")
+    surface_patch_enabled = LaunchConfiguration("surface_patch_enabled")
+    surface_patch_collision_memory_enabled = LaunchConfiguration(
+        "surface_patch_collision_memory_enabled"
+    )
     record_data = LaunchConfiguration("record_data")
     auto_start_recording = LaunchConfiguration("auto_start_recording")
     recording_rate = LaunchConfiguration("recording_rate")
@@ -82,25 +88,31 @@ def generate_launch_description():
     bridge_max_command_step_deg = LaunchConfiguration("bridge_max_command_step_deg")
     bridge_max_command_velocity_deg_s = LaunchConfiguration("bridge_max_command_velocity_deg_s")
     bridge_large_command_jump_warn_deg = LaunchConfiguration("bridge_large_command_jump_warn_deg")
-    measured_position_feedback_blend = LaunchConfiguration("measured_position_feedback_blend")
     measured_velocity_feedback_blend = LaunchConfiguration("measured_velocity_feedback_blend")
     use_synced_input_velocity_filter = LaunchConfiguration("use_synced_input_velocity_filter")
     synced_input_velocity_filter_alpha = LaunchConfiguration("synced_input_velocity_filter_alpha")
     synced_input_velocity_filter_beta = LaunchConfiguration("synced_input_velocity_filter_beta")
     synced_input_velocity_ratio_tolerance = LaunchConfiguration("synced_input_velocity_ratio_tolerance")
     estimate_velocity_in_controller = LaunchConfiguration("estimate_velocity_in_controller")
-    controller_velocity_filter_alpha = LaunchConfiguration("controller_velocity_filter_alpha")
     use_velocity_feedback_in_solver = LaunchConfiguration("use_velocity_feedback_in_solver")
     command_guard_max_step_rad = LaunchConfiguration("command_guard_max_step_rad")
     command_guard_max_velocity_rad_s = LaunchConfiguration("command_guard_max_velocity_rad_s")
     predictive_joint_limit_guard = LaunchConfiguration("predictive_joint_limit_guard")
     bridge_publish_rate = LaunchConfiguration("bridge_publish_rate")
-    control_rate = LaunchConfiguration("control_rate")
-    visualization_rate = LaunchConfiguration("visualization_rate")
     publish_visualization = LaunchConfiguration("publish_visualization")
     publish_rmp_ee_pose = LaunchConfiguration("publish_rmp_ee_pose")
     publish_target_metric = LaunchConfiguration("publish_target_metric")
     target_metric_topic = LaunchConfiguration("target_metric_topic")
+    visualize_rmp_goal_sequence = LaunchConfiguration("visualize_rmp_goal_sequence")
+    rmp_goal_sequence_topic = LaunchConfiguration("rmp_goal_sequence_topic")
+    rmp_goal_sequence_input_type = LaunchConfiguration("rmp_goal_sequence_input_type")
+    rmp_goal_sequence_marker_topic = LaunchConfiguration("rmp_goal_sequence_marker_topic")
+    rmp_goal_sequence_alpha = LaunchConfiguration("rmp_goal_sequence_alpha")
+    rmp_goal_sequence_marker_scale = LaunchConfiguration("rmp_goal_sequence_marker_scale")
+    use_rmp_goal_logger = LaunchConfiguration("use_rmp_goal_logger")
+    rmp_goal_log_rate = LaunchConfiguration("rmp_goal_log_rate")
+    rmp_goal_log_directory = LaunchConfiguration("rmp_goal_log_directory")
+    rmp_goal_log_prefix = LaunchConfiguration("rmp_goal_log_prefix")
     use_rmpflow_trace_logger = LaunchConfiguration("use_rmpflow_trace_logger")
     rmpflow_trace_log_rate = LaunchConfiguration("rmpflow_trace_log_rate")
     rmpflow_trace_log_directory = LaunchConfiguration("rmpflow_trace_log_directory")
@@ -153,7 +165,6 @@ def generate_launch_description():
         "lock_memory": lock_memory,
         "enable_socket_realtime": enable_socket_realtime,
         "socket_realtime_priority": socket_realtime_priority,
-        "measured_position_feedback_blend": measured_position_feedback_blend,
         "measured_velocity_feedback_blend": measured_velocity_feedback_blend,
         "use_synced_input_velocity_filter": use_synced_input_velocity_filter,
         "synced_input_velocity_filter_alpha": synced_input_velocity_filter_alpha,
@@ -161,14 +172,11 @@ def generate_launch_description():
         "synced_input_velocity_filter_type": "alpha-beta",
         "synced_input_velocity_ratio_tolerance": synced_input_velocity_ratio_tolerance,
         "estimate_velocity_in_controller": estimate_velocity_in_controller,
-        "controller_velocity_filter_alpha": controller_velocity_filter_alpha,
         "use_velocity_feedback_in_solver": use_velocity_feedback_in_solver,
         "publish_debug_joint_state_sources": publish_debug_joint_state_sources,
         "command_guard_max_step_rad": command_guard_max_step_rad,
         "command_guard_max_velocity_rad_s": command_guard_max_velocity_rad_s,
         "predictive_joint_limit_guard": predictive_joint_limit_guard,
-        "control_rate": control_rate,
-        "visualization_rate": visualization_rate,
         "publish_visualization": publish_visualization,
         "publish_rmp_ee_pose": publish_rmp_ee_pose,
     }
@@ -210,6 +218,10 @@ def generate_launch_description():
         executable="joint_state_adapter",
         name="joint_state_adapter",
         output="screen",
+        condition=IfCondition(PythonExpression([
+            '"', use_direct_hardware_backend, '" != "true" and "',
+            raw_joint_state_topic, '" != "', normalized_joint_state_topic, '"'
+        ])),
         parameters=[{
             "input_topic": raw_joint_state_topic,
             "output_topic": normalized_joint_state_topic,
@@ -229,6 +241,7 @@ def generate_launch_description():
             "publish_frequency": 100.0,
         }],
         remappings=[
+            ("robot_description", robot_description_topic),
             ("/joint_states", normalized_joint_state_topic),
         ],
     )
@@ -295,13 +308,47 @@ def generate_launch_description():
         executable="proximity_obstacle_bridge",
         name="proximity_obstacle_bridge",
         output="screen",
-        condition=IfCondition(use_proximity_bridge),
+        condition=IfCondition(PythonExpression([
+            '"', use_proximity_bridge, '" == "true" or "',
+            proximity_surface_visualization, '" == "true"',
+        ])),
         parameters=[
             params_file,
             {
-                "rmp_flag_gate_enabled": True,
+                "rmp_flag_gate_enabled": ParameterValue(
+                    PythonExpression([
+                        'True if "', use_proximity_bridge, '" == "true" else False'
+                    ]),
+                    value_type=bool,
+                ),
                 "rmp_flag_topic": "/RMP_flag",
                 "rmp_active_flag_value": 1,
+                "publish_collision_obstacles": ParameterValue(
+                    PythonExpression([
+                        'True if "', use_proximity_bridge, '" == "true" else False'
+                    ]),
+                    value_type=bool,
+                ),
+                "surface_patch_fixed_visualization": ParameterValue(
+                    PythonExpression([
+                        'True if "', proximity_surface_visualization,
+                        '" == "true" else False'
+                    ]),
+                    value_type=bool,
+                ),
+                "surface_patch_enabled": ParameterValue(
+                    PythonExpression([
+                        'True if "', surface_patch_enabled, '" == "true" else False'
+                    ]),
+                    value_type=bool,
+                ),
+                "surface_patch_collision_memory_enabled": ParameterValue(
+                    PythonExpression([
+                        'True if "', surface_patch_collision_memory_enabled,
+                        '" == "true" else False'
+                    ]),
+                    value_type=bool,
+                ),
             },
         ],
     )
@@ -345,6 +392,25 @@ def generate_launch_description():
         }],
     )
 
+    rmp_goal_logger = Node(
+        package="rb10_rmpflow_rviz",
+        executable="rmp_goal_logger.py",
+        name="rmp_goal_logger",
+        output="screen",
+        condition=IfCondition(use_rmp_goal_logger),
+        parameters=[{
+            "sample_rate_hz": rmp_goal_log_rate,
+            "output_directory": rmp_goal_log_directory,
+            "output_prefix": rmp_goal_log_prefix,
+            "external_goal_topic": "/RMP_goal",
+            "controller_goal_topic": "/goal_pose",
+            "rmp_flag_topic": "/RMP_flag",
+            "active_flag_value": 1,
+            "skip_until_first_goal": True,
+            "flush_every": 1,
+        }],
+    )
+
     rmpflow_trace_logger = Node(
         package="rb10_rmpflow_rviz",
         executable="rmpflow_trace_logger.py",
@@ -364,6 +430,8 @@ def generate_launch_description():
             "target_metric_topic": target_metric_topic,
             "debug_state_topic": "/rmp_debug_state",
             "rmp_ee_pose_topic": "/rmp_ee_pose",
+            "rmp_joint_accel_topic": "/rmp_joint_accel",
+            "rmp_tcp_accel_topic": "/rmp_tcp_accel",
             "obstacle_marker_topic": "/obstacles",
             "repulsion_metric_marker_topic": "/repulsion_metric_markers",
             "tcp_accel_marker_topic": "/tcp_accel_marker",
@@ -384,6 +452,25 @@ def generate_launch_description():
                 "/proximity_distance11",
                 "/proximity_distance12",
             ],
+        }],
+    )
+
+    rmp_goal_sequence_visualizer = Node(
+        package="rb10_rmpflow_rviz",
+        executable="rmp_goal_sequence_visualizer.py",
+        name="rmp_goal_sequence_visualizer",
+        output="screen",
+        condition=IfCondition(visualize_rmp_goal_sequence),
+        parameters=[{
+            "input_topic": rmp_goal_sequence_topic,
+            "input_type": rmp_goal_sequence_input_type,
+            "marker_topic": rmp_goal_sequence_marker_topic,
+            "frame_id": "base_link",
+            "alpha": rmp_goal_sequence_alpha,
+            "marker_scale": rmp_goal_sequence_marker_scale,
+            "line_width": 0.008,
+            "max_points": 100,
+            "float_stride": 0,
         }],
     )
 
@@ -440,8 +527,16 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "normalized_joint_state_topic",
-            default_value="/rb10/joint_states",
-            description="Internal normalized joint_states topic with base~wrist3 naming.",
+            default_value="/joint_states",
+            description="Joint states topic used by RViz and the controller.",
+        ),
+        DeclareLaunchArgument(
+            "robot_description_topic",
+            default_value="/rb10/robot_description",
+            description=(
+                "Robot description topic used by this launch. Kept separate from /robot_description "
+                "to avoid conflicts with hand or external robot_state_publisher nodes."
+            ),
         ),
         DeclareLaunchArgument(
             "start_local_robot_state_publisher",
@@ -491,19 +586,27 @@ def generate_launch_description():
             description="Use external proximity topics to build obstacle markers.",
         ),
         DeclareLaunchArgument(
+            "proximity_surface_visualization",
+            default_value="true",
+            description=(
+                "Publish RViz-only fixed surface patches from proximity sensor range hits. "
+                "When use_proximity_bridge is false this does not publish collision obstacles."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "surface_patch_enabled",
+            default_value="true",
+            description="Publish live proximity surface patch markers into /obstacles.",
+        ),
+        DeclareLaunchArgument(
+            "surface_patch_collision_memory_enabled",
+            default_value="true",
+            description="Feed remembered proximity surface patches into /obstacles.",
+        ),
+        DeclareLaunchArgument(
             "bridge_publish_rate",
             default_value="500.0",
             description="RB10 state receive/publish rate in Hz before filtering.",
-        ),
-        DeclareLaunchArgument(
-            "control_rate",
-            default_value="50.0",
-            description="RMP control loop rate in Hz.",
-        ),
-        DeclareLaunchArgument(
-            "visualization_rate",
-            default_value="20.0",
-            description="Controller-side RViz/debug publication rate in Hz.",
         ),
         DeclareLaunchArgument(
             "publish_visualization",
@@ -529,13 +632,66 @@ def generate_launch_description():
             description="Topic name for the target RMP metric.",
         ),
         DeclareLaunchArgument(
+            "visualize_rmp_goal_sequence",
+            default_value="true",
+            description="Visualize /RMP_goal_sequence as transparent green RViz markers.",
+        ),
+        DeclareLaunchArgument(
+            "rmp_goal_sequence_topic",
+            default_value="/RMP_goal_sequence",
+            description="Incoming goal sequence topic to visualize in RViz.",
+        ),
+        DeclareLaunchArgument(
+            "rmp_goal_sequence_input_type",
+            default_value="auto",
+            description=(
+                "Goal sequence topic type: auto, pose_array, path, pose_stamped, pose, "
+                "or float64_multi_array."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "rmp_goal_sequence_marker_topic",
+            default_value="/rmp_goal_sequence_marker",
+            description="RViz MarkerArray topic for the transparent goal sequence.",
+        ),
+        DeclareLaunchArgument(
+            "rmp_goal_sequence_alpha",
+            default_value="0.25",
+            description="Transparency alpha for the goal sequence markers.",
+        ),
+        DeclareLaunchArgument(
+            "rmp_goal_sequence_marker_scale",
+            default_value="0.03",
+            description="Sphere diameter for each transparent goal sequence point.",
+        ),
+        DeclareLaunchArgument(
+            "use_rmp_goal_logger",
+            default_value="true",
+            description="Record the bridged /goal_pose target at a fixed rate.",
+        ),
+        DeclareLaunchArgument(
+            "rmp_goal_log_rate",
+            default_value="200.0",
+            description="Goal logger sampling rate in Hz.",
+        ),
+        DeclareLaunchArgument(
+            "rmp_goal_log_directory",
+            default_value=os.path.expanduser("~/ros2_ws/log/rmp_goal"),
+            description="Directory for 200 Hz RMP goal CSV logs.",
+        ),
+        DeclareLaunchArgument(
+            "rmp_goal_log_prefix",
+            default_value="rmp_goal",
+            description="Prefix for RMP goal CSV logs.",
+        ),
+        DeclareLaunchArgument(
             "use_rmpflow_trace_logger",
             default_value="true",
             description="Start a trace logger that records RMP inputs, sensor ranges, metrics, and commands.",
         ),
         DeclareLaunchArgument(
             "rmpflow_trace_log_rate",
-            default_value="1.0",
+            default_value="200.0",
             description="Trace logger snapshot rate in Hz.",
         ),
         DeclareLaunchArgument(
@@ -545,7 +701,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "rmpflow_trace_console_summary",
-            default_value="true",
+            default_value="false",
             description="Print one-line trace summaries to the launch terminal.",
         ),
         DeclareLaunchArgument(
@@ -699,15 +855,6 @@ def generate_launch_description():
             description="Beta parameter for the RB10 joint velocity alpha-beta filter.",
         ),
         DeclareLaunchArgument(
-            "measured_position_feedback_blend",
-            default_value="1.0",
-            description=(
-                "Blend factor for solver joint position feedback. "
-                "1.0 uses only measured/reference joint position, 0.0 uses only the previous "
-                "commanded joint position."
-            ),
-        ),
-        DeclareLaunchArgument(
             "measured_velocity_feedback_blend",
             default_value="0.35",
             description=(
@@ -756,14 +903,6 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument(
-            "controller_velocity_filter_alpha",
-            default_value="0.25",
-            description=(
-                "Low-pass blend used by the controller-side joint velocity estimator. "
-                "1.0 keeps the raw 100 Hz finite-difference velocity, smaller values smooth it."
-            ),
-        ),
-        DeclareLaunchArgument(
             "use_velocity_feedback_in_solver",
             default_value="true",
             description=(
@@ -803,9 +942,11 @@ def generate_launch_description():
         rmpflow_bridge,
         data_recorder,
         joint_velocity_logger,
+        rmp_goal_logger,
         rmpflow_trace_logger,
         interactive_goal,
         obstacle_manager,
         proximity_obstacle_bridge,
+        rmp_goal_sequence_visualizer,
         rviz,
     ])
