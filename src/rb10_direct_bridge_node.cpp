@@ -185,9 +185,9 @@ public:
     declare_parameter<bool>("publish_debug_joint_state_sources", false);
     declare_parameter<double>("publish_rate", 100.0);
     declare_parameter<double>("servo_t1", 0.002);
-    declare_parameter<double>("servo_t2", 0.06);
-    declare_parameter<double>("servo_gain", 0.035);
-    declare_parameter<double>("servo_alpha", 0.3);
+    declare_parameter<double>("servo_t2", 0.1);
+    declare_parameter<double>("servo_gain", 0.02);
+    declare_parameter<double>("servo_alpha", 0.2);
     declare_parameter<double>("speedj_t1", 0.02);
     declare_parameter<double>("speedj_t2", 0.2);
     declare_parameter<double>("speedj_gain", 0.05);
@@ -582,9 +582,9 @@ private:
   bool publish_debug_joint_state_sources_{false};
   double publish_rate_hz_{100.0};
   double servo_t1_{0.002};
-  double servo_t2_{0.06};
-  double servo_gain_{0.035};
-  double servo_alpha_{0.3};
+  double servo_t2_{0.1};
+  double servo_gain_{0.02};
+  double servo_alpha_{0.2};
   double speedj_t1_{0.02};
   double speedj_t2_{0.2};
   double speedj_gain_{0.05};

@@ -1,9 +1,9 @@
 #include "rb10_rmpflow_rviz/pinocchio_direct_solver.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 
 #include "rb10_rmpflow_rviz/casadi_task_graph.hpp"
@@ -13,6 +13,8 @@ namespace rb10_rmpflow_rviz
 
 namespace
 {
+
+constexpr double kPi = 3.14159265358979323846;
 
 struct SolverImpl
 {
@@ -24,103 +26,6 @@ struct SolverImpl
 const SolverImpl & get_impl(const std::shared_ptr<const void> & state)
 {
   return *std::static_pointer_cast<const SolverImpl>(state);
-}
-
-Eigen::Vector3d normalized_or_zero(const Eigen::Vector3d & value)
-{
-  const double norm = value.norm();
-  if (norm <= 1e-9 || !std::isfinite(norm)) {
-    return Eigen::Vector3d::Zero();
-  }
-  return value / norm;
-}
-
-double predicted_clearance_along(
-  const Eigen::Vector3d & position,
-  double point_radius,
-  const Eigen::Vector3d & direction,
-  const std::vector<ObstacleSphere> & obstacles,
-  const CollisionRmpParams & params)
-{
-  const Eigen::Vector3d predicted =
-    position + std::max(params.candidate_lookahead, 0.0) * direction;
-  double min_clearance = std::numeric_limits<double>::infinity();
-  for (const auto & obstacle : obstacles) {
-    if (obstacle.radius <= 0.0) {
-      continue;
-    }
-    const double clearance =
-      (predicted - obstacle.center).norm() -
-      (point_radius + obstacle.radius) -
-      params.margin;
-    min_clearance = std::min(min_clearance, clearance);
-  }
-  if (!std::isfinite(min_clearance)) {
-    return params.metric_modulation_radius;
-  }
-  return min_clearance;
-}
-
-Eigen::Vector3d choose_custom_avoidance_direction(
-  const Eigen::Vector3d & position,
-  double point_radius,
-  const Eigen::Vector3d & velocity,
-  const Eigen::Vector3d & goal,
-  const Eigen::Vector3d & away_normal,
-  const std::vector<ObstacleSphere> & obstacles,
-  const CollisionRmpParams & params)
-{
-  const Eigen::Vector3d goal_direction = normalized_or_zero(goal - position);
-  const Eigen::Vector3d velocity_direction = normalized_or_zero(velocity);
-  const std::array<Eigen::Vector3d, 8> seeds{{
-    goal_direction,
-    velocity_direction,
-    Eigen::Vector3d::UnitZ(),
-    -Eigen::Vector3d::UnitZ(),
-    Eigen::Vector3d::UnitX(),
-    -Eigen::Vector3d::UnitX(),
-    Eigen::Vector3d::UnitY(),
-    -Eigen::Vector3d::UnitY()
-  }};
-
-  Eigen::Vector3d best_direction = Eigen::Vector3d::Zero();
-  double best_score = -std::numeric_limits<double>::infinity();
-  const double influence_distance = std::max(params.metric_modulation_radius, 1e-9);
-  for (const auto & seed : seeds) {
-    if (seed.squaredNorm() <= 1e-12) {
-      continue;
-    }
-    Eigen::Vector3d candidate = seed - away_normal * seed.dot(away_normal);
-    candidate = normalized_or_zero(candidate);
-    if (candidate.squaredNorm() <= 1e-12) {
-      continue;
-    }
-
-    const double goal_alignment =
-      goal_direction.squaredNorm() > 1e-12 ? candidate.dot(goal_direction) : 0.0;
-    const double velocity_alignment =
-      velocity_direction.squaredNorm() > 1e-12 ? candidate.dot(velocity_direction) : 0.0;
-    const double predicted_clearance =
-      predicted_clearance_along(position, point_radius, candidate, obstacles, params);
-    const double clearance_score =
-      std::clamp(predicted_clearance / influence_distance, 0.0, 1.0);
-    const double toward_penalty = std::max(0.0, -candidate.dot(away_normal));
-    const double score =
-      params.goal_weight * goal_alignment +
-      params.clearance_weight * clearance_score +
-      params.velocity_weight * velocity_alignment -
-      params.toward_penalty_weight * toward_penalty;
-
-    if (score > best_score) {
-      best_score = score;
-      best_direction = candidate;
-    }
-  }
-
-  if (best_direction.squaredNorm() > 1e-12) {
-    return best_direction;
-  }
-  return away_normal;
 }
 
 std::vector<std::size_t> build_topological_order(const EigenRmpConfig & config)
@@ -252,6 +157,308 @@ bool body_obstacle_interacts_with_sensor_control_point(
   return false;
 }
 
+double smoothstep01(double value)
+{
+  const double t = std::clamp(value, 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+
+double tangent_escape_activation(
+  double clearance,
+  const TangentEscapeRmpParams & params)
+{
+  if (clearance >= params.influence_distance) {
+    return 0.0;
+  }
+  if (clearance <= params.safe_distance) {
+    return 1.0;
+  }
+
+  const double span = std::max(params.influence_distance - params.safe_distance, 1e-9);
+  const double normalized = (clearance - params.safe_distance) / span;
+  return 1.0 - smoothstep01(normalized);
+}
+
+std::optional<Eigen::Vector3d> project_to_tangent_direction(
+  const Eigen::Vector3d & direction,
+  const Eigen::Vector3d & normal,
+  double min_tangent_norm)
+{
+  if (!direction.allFinite()) {
+    return std::nullopt;
+  }
+
+  Eigen::Vector3d tangent = direction - direction.dot(normal) * normal;
+  const double tangent_norm = tangent.norm();
+  if (tangent_norm <= min_tangent_norm) {
+    return std::nullopt;
+  }
+  return tangent / tangent_norm;
+}
+
+void append_unique_escape_direction(
+  std::vector<Eigen::Vector3d> & directions,
+  const Eigen::Vector3d & candidate,
+  const Eigen::Vector3d & normal,
+  double min_tangent_norm)
+{
+  const auto tangent = project_to_tangent_direction(candidate, normal, min_tangent_norm);
+  if (!tangent.has_value()) {
+    return;
+  }
+
+  for (const auto & direction : directions) {
+    if (direction.dot(tangent.value()) > 0.98) {
+      return;
+    }
+  }
+  directions.push_back(tangent.value());
+}
+
+std::vector<Eigen::Vector3d> make_tangent_escape_directions(
+  const Eigen::Vector3d & normal,
+  const Eigen::Vector3d & goal_direction,
+  const Eigen::Vector3d & point_velocity,
+  const TangentEscapeRmpParams & params,
+  bool previous_tangent_valid,
+  const Eigen::Vector3d & previous_tangent)
+{
+  std::vector<Eigen::Vector3d> directions;
+  directions.reserve(static_cast<std::size_t>(std::max(params.candidate_count, 4) + 10));
+
+  append_unique_escape_direction(
+    directions, goal_direction, normal, params.min_tangent_norm);
+  append_unique_escape_direction(
+    directions, -goal_direction, normal, params.min_tangent_norm);
+  if (previous_tangent_valid) {
+    append_unique_escape_direction(
+      directions, previous_tangent, normal, params.min_tangent_norm);
+    append_unique_escape_direction(
+      directions, -previous_tangent, normal, params.min_tangent_norm);
+  }
+  append_unique_escape_direction(
+    directions, point_velocity, normal, params.min_tangent_norm);
+  append_unique_escape_direction(
+    directions, -point_velocity, normal, params.min_tangent_norm);
+  append_unique_escape_direction(
+    directions, Eigen::Vector3d::UnitZ(), normal, params.min_tangent_norm);
+  append_unique_escape_direction(
+    directions, -Eigen::Vector3d::UnitZ(), normal, params.min_tangent_norm);
+  append_unique_escape_direction(
+    directions, Eigen::Vector3d::UnitX(), normal, params.min_tangent_norm);
+  append_unique_escape_direction(
+    directions, -Eigen::Vector3d::UnitX(), normal, params.min_tangent_norm);
+  append_unique_escape_direction(
+    directions, Eigen::Vector3d::UnitY(), normal, params.min_tangent_norm);
+  append_unique_escape_direction(
+    directions, -Eigen::Vector3d::UnitY(), normal, params.min_tangent_norm);
+
+  const Eigen::Vector3d reference =
+    std::abs(normal.z()) < 0.9 ? Eigen::Vector3d::UnitZ() : Eigen::Vector3d::UnitY();
+  Eigen::Vector3d basis_u = reference.cross(normal);
+  if (basis_u.norm() <= 1e-9) {
+    basis_u = Eigen::Vector3d::UnitX().cross(normal);
+  }
+  basis_u.normalize();
+  const Eigen::Vector3d basis_v = normal.cross(basis_u).normalized();
+  const int candidate_count = std::max(params.candidate_count, 4);
+  for (int index = 0; index < candidate_count; ++index) {
+    const double angle = 2.0 * kPi * static_cast<double>(index) /
+      static_cast<double>(candidate_count);
+    append_unique_escape_direction(
+      directions,
+      std::cos(angle) * basis_u + std::sin(angle) * basis_v,
+      normal,
+      params.min_tangent_norm);
+  }
+
+  if (directions.empty()) {
+    directions.push_back(basis_u);
+  }
+  return directions;
+}
+
+std::string sensor_direction_suffix(const std::string & frame_name)
+{
+  const auto separator = frame_name.find_last_of('_');
+  if (separator == std::string::npos || separator + 1 >= frame_name.size()) {
+    return frame_name;
+  }
+  return frame_name.substr(separator + 1);
+}
+
+std::optional<std::size_t> paired_sensor_index(std::size_t sensor_index)
+{
+  if (sensor_index >= RB10Model::sensor_control_points.size()) {
+    return std::nullopt;
+  }
+
+  const auto & sensor = RB10Model::sensor_control_points[sensor_index];
+  const std::string direction = sensor_direction_suffix(sensor.frame_name);
+  std::optional<std::size_t> best_index;
+  double best_distance = std::numeric_limits<double>::infinity();
+  for (std::size_t index = 0; index < RB10Model::sensor_control_points.size(); ++index) {
+    if (index == sensor_index) {
+      continue;
+    }
+    const auto & candidate = RB10Model::sensor_control_points[index];
+    if (candidate.parent_link != sensor.parent_link) {
+      continue;
+    }
+    if (sensor_direction_suffix(candidate.frame_name) != direction) {
+      continue;
+    }
+    const double distance = (candidate.offset - sensor.offset).norm();
+    if (distance < 0.05 || distance >= best_distance) {
+      continue;
+    }
+    best_index = index;
+    best_distance = distance;
+  }
+  return best_index;
+}
+
+double proximity_sensor_detection(
+  std::size_t sensor_index,
+  const PinocchioDirectRmpSolver::NodeGeometry & geometry,
+  const std::vector<ObstacleSphere> & obstacles,
+  const TangentEscapeRmpParams & params,
+  double collision_margin)
+{
+  if (
+    sensor_index >= RB10Model::sensor_control_points.size() ||
+    geometry.x.size() < static_cast<Eigen::Index>(3 * (sensor_index + 1)))
+  {
+    return 0.0;
+  }
+
+  const Eigen::Vector3d control_point =
+    geometry.x.segment<3>(static_cast<Eigen::Index>(3 * sensor_index));
+  const double control_point_radius = RB10Model::sensor_control_points[sensor_index].radius;
+  double detection = 0.0;
+  for (const auto & obstacle : obstacles) {
+    if (
+      obstacle.proximity_control_point_index != static_cast<int>(sensor_index) ||
+      obstacle.radius <= 0.0 ||
+      !obstacle.center.allFinite())
+    {
+      continue;
+    }
+    const double clearance =
+      (control_point - obstacle.center).norm() -
+      (control_point_radius + obstacle.radius) -
+      collision_margin;
+    detection = std::max(detection, tangent_escape_activation(clearance, params));
+  }
+  return detection;
+}
+
+double score_tangent_escape_duplicate_risk(
+  std::size_t active_sensor_index,
+  const Eigen::Vector3d & direction,
+  const Eigen::Vector3d & normal,
+  const PinocchioDirectRmpSolver::NodeGeometry & geometry,
+  const std::vector<ObstacleSphere> & obstacles,
+  const TangentEscapeRmpParams & params,
+  double collision_margin)
+{
+  const auto pair_index = paired_sensor_index(active_sensor_index);
+  if (
+    !pair_index.has_value() ||
+    active_sensor_index >= RB10Model::sensor_control_points.size() ||
+    pair_index.value() >= RB10Model::sensor_control_points.size() ||
+    geometry.x.size() < static_cast<Eigen::Index>(3 * (pair_index.value() + 1)))
+  {
+    return 0.0;
+  }
+
+  const auto active_position =
+    geometry.x.segment<3>(static_cast<Eigen::Index>(3 * active_sensor_index));
+  const auto pair_position =
+    geometry.x.segment<3>(static_cast<Eigen::Index>(3 * pair_index.value()));
+  const auto pair_axis = project_to_tangent_direction(
+    pair_position - active_position,
+    normal,
+    params.min_tangent_norm);
+  if (!pair_axis.has_value()) {
+    return 0.0;
+  }
+
+  const double paired_detection = proximity_sensor_detection(
+    pair_index.value(), geometry, obstacles, params, collision_margin);
+  const double toward_pair = std::max(0.0, direction.dot(pair_axis.value()));
+  return paired_detection * toward_pair * toward_pair;
+}
+
+double score_tangent_escape_adjacent_block(
+  std::size_t active_sensor_index,
+  const Eigen::Vector3d & direction,
+  const Eigen::Vector3d & normal,
+  const PinocchioDirectRmpSolver::NodeGeometry & geometry,
+  const std::vector<ObstacleSphere> & obstacles,
+  const TangentEscapeRmpParams & params,
+  double collision_margin)
+{
+  if (
+    active_sensor_index >= RB10Model::sensor_control_points.size() ||
+    geometry.x.size() < static_cast<Eigen::Index>(3 * (active_sensor_index + 1)))
+  {
+    return 0.0;
+  }
+
+  const auto pair_index = paired_sensor_index(active_sensor_index);
+  const auto & active_sensor = RB10Model::sensor_control_points[active_sensor_index];
+  const auto active_position =
+    geometry.x.segment<3>(static_cast<Eigen::Index>(3 * active_sensor_index));
+  double penalty = 0.0;
+  for (std::size_t index = 0; index < RB10Model::sensor_control_points.size(); ++index) {
+    if (
+      index == active_sensor_index ||
+      (pair_index.has_value() && index == pair_index.value()) ||
+      geometry.x.size() < static_cast<Eigen::Index>(3 * (index + 1)))
+    {
+      continue;
+    }
+    const auto & sensor = RB10Model::sensor_control_points[index];
+    if (sensor.parent_link != active_sensor.parent_link) {
+      continue;
+    }
+
+    const double detection =
+      proximity_sensor_detection(index, geometry, obstacles, params, collision_margin);
+    if (detection <= 0.0) {
+      continue;
+    }
+
+    const auto sensor_position =
+      geometry.x.segment<3>(static_cast<Eigen::Index>(3 * index));
+    const auto sensor_axis = project_to_tangent_direction(
+      sensor_position - active_position,
+      normal,
+      params.min_tangent_norm);
+    if (!sensor_axis.has_value()) {
+      continue;
+    }
+    const double alignment = std::max(0.0, direction.dot(sensor_axis.value()));
+    penalty += detection * alignment * alignment;
+  }
+
+  return std::clamp(penalty, 0.0, 3.0);
+}
+
+struct TangentEscapeRmpCandidate
+{
+  std::size_t control_point_index{0};
+  Eigen::Vector3d normal{Eigen::Vector3d::UnitZ()};
+  Eigen::Vector3d tangent{Eigen::Vector3d::UnitX()};
+  Eigen::Matrix<double, 3, 6> jacobian{Eigen::Matrix<double, 3, 6>::Zero()};
+  Eigen::Vector3d velocity{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d curvature{Eigen::Vector3d::Zero()};
+  double activation{0.0};
+  double score{0.0};
+  bool has_tangent{false};
+};
+
 PinocchioDirectRmpSolver::JointVector resolve_root_direct(
   const PinocchioDirectRmpSolver::Matrix6 & metric,
   const PinocchioDirectRmpSolver::JointVector & force,
@@ -302,12 +509,8 @@ PinocchioDirectRmpSolver::PinocchioDirectRmpSolver(
 : config_(std::move(config)),
   model_(std::make_shared<PinocchioModel>(urdf_path))
 {
-  if (
-    config_.collision.policy != "repulsive" &&
-    config_.collision.policy != "custom_avoidance")
-  {
-    throw std::runtime_error(
-            "collision_policy must be one of: repulsive, custom_avoidance");
+  if (config_.collision.policy != "repulsive") {
+    throw std::runtime_error("collision_policy must be repulsive");
   }
   auto impl = std::make_shared<SolverImpl>();
   impl->topo_indices = build_topological_order(config_);
@@ -371,40 +574,17 @@ RmpSolveResult PinocchioDirectRmpSolver::solve(
     const auto & node = config_.graph_nodes[index];
     const auto & geometry = cache.at(node.name);
     const auto accumulate_leaf = [&](const std::string & leaf_type) {
-        if (
-          leaf_type == "collision" &&
-          config_.collision.policy == "custom_avoidance")
-        {
-          const std::string control_points_node =
-            node.parents.empty() ? std::string("control_points") : node.parents.front();
-          const auto control_points_it = cache.find(control_points_node);
-          if (control_points_it == cache.end()) {
-            throw std::runtime_error(
-                    "custom_avoidance collision requires parent control point geometry");
-          }
-          Eigen::Vector3d custom_goal = Eigen::Vector3d::Zero();
-          const auto goal_it = vector_targets.find("goal");
-          if (goal_it != vector_targets.end()) {
-            custom_goal = goal_it->second;
-          }
-          accumulate_custom_avoidance_collision(
-            control_points_it->second,
-            custom_goal,
-            obstacles,
-            metric,
-            force);
-          return;
-        }
         accumulate_leaf_type(
           leaf_type,
           node,
           geometry,
           qd,
-          cache,
-          vector_targets,
-          external_rmps,
-          metric,
-          force);
+	          cache,
+	          vector_targets,
+          obstacles,
+	          external_rmps,
+	          metric,
+	          force);
       };
     accumulate_leaf(node.leaf_rmp_type);
     accumulate_leaf(node.handcrafted_leaf_rmp_type);
@@ -648,14 +828,12 @@ PinocchioDirectRmpSolver::NodeGeometry PinocchioDirectRmpSolver::evaluate_native
     out.jacobian = Eigen::MatrixXd::Zero(12, 6);
     out.velocity.resize(12);
     out.curvature = Eigen::VectorXd::Zero(12);
-    const auto & lower_limits = model_->lower_limits();
-    const auto & upper_limits = model_->upper_limits();
     for (int joint = 0; joint < 6; ++joint) {
       const double lower =
-        lower_limits[static_cast<std::size_t>(joint)] +
+        config_.joint_lower_limits[static_cast<std::size_t>(joint)] +
         config_.joint_limit_buffers[static_cast<std::size_t>(joint)];
       const double upper =
-        upper_limits[static_cast<std::size_t>(joint)] -
+        config_.joint_upper_limits[static_cast<std::size_t>(joint)] -
         config_.joint_limit_buffers[static_cast<std::size_t>(joint)];
       out.x[2 * joint] = upper - parents.front().x[joint];
       out.x[2 * joint + 1] = parents.front().x[joint] - lower;
@@ -751,8 +929,7 @@ PinocchioDirectRmpSolver::NodeGeometry PinocchioDirectRmpSolver::evaluate_native
     std::vector<double> velocities;
     std::vector<double> curvatures;
     std::vector<Eigen::RowVectorXd> jacobians;
-    const auto & collision_params = config_.collision.policy == "custom_avoidance" ?
-      config_.custom_avoidance : config_.collision;
+    const auto & collision_params = config_.collision;
     xs.reserve(static_cast<std::size_t>(
       num_control_points * (static_cast<int>(obstacles.size()) + (config_.body_obstacles.empty() ? 0 : 1))));
     velocities.reserve(xs.capacity());
@@ -1055,6 +1232,7 @@ void PinocchioDirectRmpSolver::accumulate_leaf_type(
   const JointVector & qd,
   const std::unordered_map<std::string, NodeGeometry> & cache,
   const std::unordered_map<std::string, Eigen::Vector3d> & vector_targets,
+  const std::vector<ObstacleSphere> & obstacles,
   const std::unordered_map<std::string, ExternalRmpFeature> & external_rmps,
   Matrix6 & metric,
   JointVector & force) const
@@ -1146,6 +1324,19 @@ void PinocchioDirectRmpSolver::accumulate_leaf_type(
   }
   if (leaf_type == "collision") {
     accumulate_collision(geometry, qd, metric, force);
+    return;
+  }
+  if (leaf_type == "tangent_escape") {
+    const auto target_it = vector_targets.find(node.target_key);
+    if (target_it != vector_targets.end()) {
+      accumulate_tangent_escape(
+        geometry,
+        qd,
+        target_it->second,
+        obstacles,
+        metric,
+        force);
+    }
     return;
   }
   if (leaf_type == "damping") {
@@ -1467,96 +1658,199 @@ void PinocchioDirectRmpSolver::accumulate_collision(
   }
 }
 
-void PinocchioDirectRmpSolver::accumulate_custom_avoidance_collision(
-  const NodeGeometry & control_point_geometry,
+void PinocchioDirectRmpSolver::accumulate_tangent_escape(
+  const NodeGeometry & geometry,
+  const JointVector & qd,
   const Eigen::Vector3d & goal,
   const std::vector<ObstacleSphere> & obstacles,
   Matrix6 & metric,
   JointVector & force) const
 {
-  if (obstacles.empty()) {
+  const auto & params = config_.tangent_escape;
+  const double tangent_metric_scalar = std::max(params.metric_scalar, 0.0);
+  const double normal_metric_scalar = std::max(params.normal_metric_scalar, 0.0);
+  if (
+    !params.enabled ||
+    (tangent_metric_scalar <= 0.0 && normal_metric_scalar <= 0.0) ||
+    obstacles.empty() ||
+    geometry.x.size() % 3 != 0 ||
+    geometry.jacobian.cols() != 6)
+  {
     return;
   }
 
-  const auto & params = config_.custom_avoidance;
   const bool use_natural_rmp = uses_rmp2_solve() && uses_natural_rmp();
-  const double influence_distance = std::max(params.metric_modulation_radius, 1e-9);
-  const int control_points = static_cast<int>(control_point_geometry.x.size() / 3);
-  for (int point_index = 0; point_index < control_points; ++point_index) {
-    if (point_index >= static_cast<int>(RB10Model::sensor_control_points.size())) {
+  const auto velocity = velocity_of(geometry, qd);
+  std::optional<TangentEscapeRmpCandidate> best_candidate;
+  double best_score = -std::numeric_limits<double>::infinity();
+  const std::size_t point_count = static_cast<std::size_t>(geometry.x.size() / 3);
+
+  for (std::size_t point_index = 0; point_index < point_count; ++point_index) {
+    if (point_index >= RB10Model::sensor_control_points.size()) {
       break;
     }
 
-    const Eigen::Index offset = static_cast<Eigen::Index>(3 * point_index);
-    if (
-      offset + 2 >= control_point_geometry.x.size() ||
-      offset + 2 >= control_point_geometry.velocity.size() ||
-      offset + 2 >= control_point_geometry.curvature.size() ||
-      control_point_geometry.jacobian.rows() <= offset + 2)
-    {
-      continue;
-    }
-
-    const Eigen::Vector3d position = control_point_geometry.x.segment<3>(offset);
-    const Eigen::Matrix<double, 3, 6> jacobian =
-      control_point_geometry.jacobian.block<3, 6>(offset, 0);
-    const Eigen::Vector3d velocity = control_point_geometry.velocity.segment<3>(offset);
-    const Eigen::Vector3d curvature = control_point_geometry.curvature.segment<3>(offset);
-    const double point_radius =
-      RB10Model::sensor_control_points[static_cast<std::size_t>(point_index)].radius;
+    const Eigen::Vector3d control_point =
+      geometry.x.segment<3>(static_cast<Eigen::Index>(3 * point_index));
+    const Eigen::Matrix<double, 3, 6> point_jacobian =
+      geometry.jacobian.block<3, 6>(static_cast<Eigen::Index>(3 * point_index), 0);
+    const Eigen::Vector3d point_velocity =
+      velocity.segment<3>(static_cast<Eigen::Index>(3 * point_index));
+    const Eigen::Vector3d point_curvature =
+      geometry.curvature.segment<3>(static_cast<Eigen::Index>(3 * point_index));
+    const double point_radius = RB10Model::sensor_control_points[point_index].radius;
 
     for (const auto & obstacle : obstacles) {
-      const Eigen::Vector3d delta = position - obstacle.center;
-      const double center_distance = std::max(delta.norm(), 1e-9);
-      const double clearance =
-        center_distance - (point_radius + obstacle.radius) - params.margin;
-      if (clearance >= influence_distance) {
+      if (
+        obstacle.radius <= 0.0 ||
+        !obstacle.center.allFinite() ||
+        (obstacle.proximity_control_point_index >= 0 &&
+        obstacle.proximity_control_point_index != static_cast<int>(point_index)))
+      {
         continue;
       }
 
-      const Eigen::Vector3d n = delta / center_distance;
-      const double clipped_clearance = std::clamp(clearance, 0.0, influence_distance);
-      const double ratio = clipped_clearance / influence_distance;
-      const double alpha = 1.0 - (ratio * ratio * (3.0 - 2.0 * ratio));
-
-      const Eigen::Vector3d escape_direction = choose_custom_avoidance_direction(
-        position,
-        point_radius,
-        velocity,
-        goal,
-        n,
-        obstacles,
-        params);
-
-      Eigen::Vector3d acceleration =
-        params.up_gain * (params.up_speed * escape_direction - velocity);
-      const double approaching_speed = std::max(0.0, -n.dot(velocity));
-      if (clearance < params.safe_distance) {
-        acceleration +=
-          params.safe_gain * (params.safe_distance - clearance) * n +
-          params.damping_gain * approaching_speed * n;
+      const Eigen::Vector3d delta = control_point - obstacle.center;
+      const double center_distance = delta.norm();
+      if (center_distance <= 1e-9) {
+        continue;
       }
 
-      const double accel_norm = acceleration.norm();
-      if (accel_norm > params.max_accel && accel_norm > 1e-9) {
-        acceleration *= params.max_accel / accel_norm;
+      const double clearance =
+        center_distance - (point_radius + obstacle.radius) - config_.collision.margin;
+      const double activation = tangent_escape_activation(clearance, params);
+      if (activation < params.min_activation) {
+        continue;
       }
-      acceleration *= alpha;
 
-      const double x = std::max(clearance, 0.0);
-      const double metric_scalar =
-        alpha * params.metric_scalar /
-        (x / params.metric_exploder_std_dev + params.metric_exploder_eps);
+      const Eigen::Vector3d normal = delta / center_distance;
+      const Eigen::Vector3d goal_delta = goal - control_point;
+      const double goal_distance = goal_delta.norm();
+      if (goal_distance <= 1e-9) {
+        continue;
+      }
 
-      accumulate_vector_leaf(
-        use_natural_rmp,
-        jacobian,
-        metric_scalar * Eigen::Matrix3d::Identity(),
-        acceleration,
-        curvature,
-        metric,
-        force);
+      const Eigen::Vector3d goal_direction = goal_delta / goal_distance;
+      const double goal_normal_dot = goal_direction.dot(normal);
+      const bool tangent_allowed = goal_normal_dot < params.goal_normal_dot_threshold;
+      if (!tangent_allowed && normal_metric_scalar <= 0.0) {
+        continue;
+      }
+
+      const auto escape_directions = make_tangent_escape_directions(
+        normal,
+        goal_direction,
+        point_velocity,
+        params,
+        tangent_escape_previous_tangent_valid_,
+        tangent_escape_previous_tangent_);
+      Eigen::Vector3d best_direction = escape_directions.front();
+      double best_direction_score = -std::numeric_limits<double>::infinity();
+      for (const auto & direction : escape_directions) {
+        const double goal_score = direction.dot(goal_direction);
+        const double continuity_score = tangent_escape_previous_tangent_valid_ ?
+          direction.dot(tangent_escape_previous_tangent_) :
+          0.0;
+        const double up_score = direction.z();
+        const double duplicate_risk_score = score_tangent_escape_duplicate_risk(
+          point_index,
+          direction,
+          normal,
+          geometry,
+          obstacles,
+          params,
+          config_.collision.margin);
+        const double adjacent_block_score = score_tangent_escape_adjacent_block(
+          point_index,
+          direction,
+          normal,
+          geometry,
+          obstacles,
+          params,
+          config_.collision.margin);
+        const double branch_hold_score =
+          tangent_escape_previous_tangent_valid_ &&
+          tangent_escape_previous_control_point_index_ == point_index ?
+          std::pow(std::max(0.0, direction.dot(tangent_escape_previous_tangent_)), 2.0) :
+          0.0;
+
+        const double direction_score =
+          params.goal_weight * goal_score +
+          params.continuity_weight * continuity_score +
+          params.up_weight * up_score -
+          params.duplicate_risk_weight * duplicate_risk_score -
+          params.adjacent_block_weight * adjacent_block_score +
+          params.branch_hold_weight * branch_hold_score;
+        if (direction_score > best_direction_score) {
+          best_direction_score = direction_score;
+          best_direction = direction;
+        }
+      }
+
+      const double inward_goal = std::max(0.0, -goal_normal_dot);
+      const double candidate_score = activation * (1.0 + inward_goal + best_direction_score);
+      if (candidate_score <= best_score) {
+        continue;
+      }
+
+      TangentEscapeRmpCandidate candidate;
+      candidate.control_point_index = point_index;
+      candidate.normal = normal;
+      candidate.tangent = best_direction;
+      candidate.jacobian = point_jacobian;
+      candidate.velocity = point_velocity;
+      candidate.curvature = point_curvature;
+      candidate.activation = activation;
+      candidate.score = candidate_score;
+      candidate.has_tangent = tangent_allowed;
+      best_candidate = candidate;
+      best_score = candidate_score;
     }
+  }
+
+  if (!best_candidate.has_value()) {
+    return;
+  }
+
+  const auto & candidate = best_candidate.value();
+  Eigen::Vector3d desired_acceleration =
+    -std::max(params.damping_gain, 0.0) * candidate.velocity;
+  Eigen::Matrix3d leaf_metric = Eigen::Matrix3d::Zero();
+  if (candidate.has_tangent && tangent_metric_scalar > 0.0) {
+    const double desired_tangent_accel = candidate.activation * params.tangent_gain;
+    const double current_tangent_velocity = candidate.velocity.dot(candidate.tangent);
+    desired_acceleration +=
+      desired_tangent_accel * candidate.tangent -
+      std::max(params.damping_gain, 0.0) * current_tangent_velocity * candidate.tangent;
+    leaf_metric +=
+      candidate.activation * tangent_metric_scalar *
+      (candidate.tangent * candidate.tangent.transpose());
+  }
+  if (normal_metric_scalar > 0.0 && params.normal_gain > 0.0) {
+    const double inward_velocity = std::max(0.0, -candidate.normal.dot(candidate.velocity));
+    desired_acceleration +=
+      candidate.activation * params.normal_gain * (1.0 + inward_velocity) * candidate.normal;
+    leaf_metric +=
+      candidate.activation * normal_metric_scalar *
+      (candidate.normal * candidate.normal.transpose());
+  }
+  if (leaf_metric.cwiseAbs().maxCoeff() <= 0.0) {
+    return;
+  }
+
+  accumulate_vector_leaf(
+    use_natural_rmp,
+    candidate.jacobian,
+    leaf_metric,
+    desired_acceleration,
+    candidate.curvature,
+    metric,
+    force);
+
+  if (candidate.has_tangent) {
+    tangent_escape_previous_tangent_ = candidate.tangent;
+    tangent_escape_previous_control_point_index_ = candidate.control_point_index;
+    tangent_escape_previous_tangent_valid_ = true;
   }
 }
 

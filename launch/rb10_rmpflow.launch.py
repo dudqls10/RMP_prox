@@ -95,9 +95,6 @@ def generate_launch_description():
     synced_input_velocity_ratio_tolerance = LaunchConfiguration("synced_input_velocity_ratio_tolerance")
     estimate_velocity_in_controller = LaunchConfiguration("estimate_velocity_in_controller")
     use_velocity_feedback_in_solver = LaunchConfiguration("use_velocity_feedback_in_solver")
-    command_guard_max_step_rad = LaunchConfiguration("command_guard_max_step_rad")
-    command_guard_max_velocity_rad_s = LaunchConfiguration("command_guard_max_velocity_rad_s")
-    predictive_joint_limit_guard = LaunchConfiguration("predictive_joint_limit_guard")
     bridge_publish_rate = LaunchConfiguration("bridge_publish_rate")
     publish_visualization = LaunchConfiguration("publish_visualization")
     publish_rmp_ee_pose = LaunchConfiguration("publish_rmp_ee_pose")
@@ -174,9 +171,6 @@ def generate_launch_description():
         "estimate_velocity_in_controller": estimate_velocity_in_controller,
         "use_velocity_feedback_in_solver": use_velocity_feedback_in_solver,
         "publish_debug_joint_state_sources": publish_debug_joint_state_sources,
-        "command_guard_max_step_rad": command_guard_max_step_rad,
-        "command_guard_max_velocity_rad_s": command_guard_max_velocity_rad_s,
-        "predictive_joint_limit_guard": predictive_joint_limit_guard,
         "publish_visualization": publish_visualization,
         "publish_rmp_ee_pose": publish_rmp_ee_pose,
     }
@@ -374,6 +368,9 @@ def generate_launch_description():
             "reference_joint_state_topic": "/rb10/reference_joint_states",
             "measured_joint_state_topic": "/rb10/measured_joint_states",
             "tracking_error_topic": "/rb10/joint_tracking_error_deg",
+            "rmp_tcp_accel_topic": "/rmp_tcp_accel",
+            "tangent_escape_filter_data_topic": "/tangent_escape_filter_data",
+            "tangent_escape_filter_candidate_data_topic": "/tangent_escape_filter_candidates",
         }],
     )
 
@@ -761,7 +758,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "servo_alpha",
-            default_value="0.4",
+            default_value="0.2",
             description="ServoJ low-pass filter gain for the internal RB10 bridge.",
         ),
         DeclareLaunchArgument(
@@ -908,30 +905,6 @@ def generate_launch_description():
             description=(
                 "Pass joint velocity to the RMP solver. Set false to test position-only feedback "
                 "by zeroing qd before the solve step."
-            ),
-        ),
-        DeclareLaunchArgument(
-            "command_guard_max_step_rad",
-            default_value="0.00436332313",
-            description=(
-                "Maximum per-cycle joint position correction applied by the controller command "
-                "guard, in radians."
-            ),
-        ),
-        DeclareLaunchArgument(
-            "command_guard_max_velocity_rad_s",
-            default_value="0.5",
-            description=(
-                "Maximum joint velocity allowed by the controller command guard, in radians per "
-                "second."
-            ),
-        ),
-        DeclareLaunchArgument(
-            "predictive_joint_limit_guard",
-            default_value="true",
-            description=(
-                "In velocity command mode, clamp qd using measured_q + qd * dt so the next "
-                "commanded joint position stays inside the configured joint limits."
             ),
         ),
         OpaqueFunction(function=_validate_params_file),

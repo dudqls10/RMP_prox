@@ -5,7 +5,7 @@ Panels:
     Property Tree Widget:
       Expanded: ~
       Splitter Ratio: 0.5
-    Tree Height: 216
+    Tree Height: 325
   - Class: rviz_common/Selection
     Name: Selection
   - Class: rviz_common/Tool Properties
@@ -49,186 +49,20 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /rb10/robot_description
-      Enabled: true
+      Enabled: false
       Links:
         All Links Enabled: true
         Expand Joint Details: false
         Expand Link Details: false
         Expand Tree: false
         Link Tree Style: Links in Alphabetic Order
-        base_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        gripper:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link0:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link1:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link2:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link3:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link3_5:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        link4:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link5:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link6:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link6_1:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        sensor_link2:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        sensor_link2_1:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        sensor_link3:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        sensor_link3_1:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        tcp:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        tcp_gripper:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tcp_rmp:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        tof6_1_F:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tof6_1_L:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tof6_1_R:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tof6_1_U:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tof_E:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tof_N:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tof_S:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tof_W:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tof2_E:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tof2_N:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tof2_S:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tof2_W:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tof2_1_E:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tof2_1_N:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tof2_1_S:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tof2_1_W:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tof3_1_E:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tof3_1_N:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tof3_1_S:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tof3_1_W:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
       Mass Properties:
         Inertia: false
         Mass: false
       Name: RobotModel
       TF Prefix: ""
       Update Interval: 0
-      Value: true
+      Value: false
       Visual Enabled: true
     - Class: rviz_default_plugins/Marker
       Enabled: true
@@ -247,7 +81,6 @@ Visualization Manager:
       Enabled: true
       Name: RMPGoalSequence
       Namespaces:
-        rmp_goal_sequence: true
         rmp_goal_sequence_line: true
         rmp_goal_sequence_points: true
       Topic:
@@ -279,13 +112,13 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /obstacles
+        Value: /obstacle_markers
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: ProximitySurfacePatches
       Namespaces:
-        proximity_surface_patches: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -309,7 +142,7 @@ Visualization Manager:
       Enabled: true
       Name: RepulsionMetric
       Namespaces:
-        repulsion_metric_dots: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -349,159 +182,19 @@ Visualization Manager:
       Show Visual Aids: false
       Value: true
     - Class: rviz_default_plugins/TF
-      Enabled: true
+      Enabled: false
       Frame Timeout: 15
       Frames:
         All Enabled: false
-        base_link:
-          Value: true
-        gripper:
-          Value: true
-        link0:
-          Value: true
-        link1:
-          Value: true
-        link2:
-          Value: true
-        link3:
-          Value: true
-        link3_5:
-          Value: true
-        link4:
-          Value: true
-        link5:
-          Value: true
-        link6:
-          Value: true
-        link6_1:
-          Value: true
-        rmp_goal_target:
-          Value: true
-        sensor_link2:
-          Value: true
-        sensor_link2_1:
-          Value: true
-        sensor_link3:
-          Value: true
-        sensor_link3_1:
-          Value: true
-        tcp:
-          Value: true
-        tcp_gripper:
-          Value: true
-        tcp_rmp:
-          Value: true
-        tof6_1_F:
-          Value: true
-        tof6_1_L:
-          Value: true
-        tof6_1_R:
-          Value: true
-        tof6_1_U:
-          Value: true
-        tof_E:
-          Value: true
-        tof_N:
-          Value: true
-        tof_S:
-          Value: true
-        tof_W:
-          Value: true
-        tof2_E:
-          Value: true
-        tof2_N:
-          Value: true
-        tof2_S:
-          Value: true
-        tof2_W:
-          Value: true
-        tof2_1_E:
-          Value: true
-        tof2_1_N:
-          Value: true
-        tof2_1_S:
-          Value: true
-        tof2_1_W:
-          Value: true
-        tof3_1_E:
-          Value: true
-        tof3_1_N:
-          Value: true
-        tof3_1_S:
-          Value: true
-        tof3_1_W:
-          Value: true
       Marker Scale: 0.30000001192092896
       Name: TF
       Show Arrows: true
       Show Axes: true
       Show Names: true
       Tree:
-        base_link:
-          link0:
-            link1:
-              link2:
-                link3:
-                  link3_5:
-                    link4:
-                      link5:
-                        link6:
-                          link6_1:
-                            tof6_1_F:
-                              {}
-                            tof6_1_L:
-                              {}
-                            tof6_1_R:
-                              {}
-                            tof6_1_U:
-                              {}
-                          tcp:
-                            gripper:
-                              {}
-                            tcp_gripper:
-                              {}
-                            tcp_rmp:
-                              {}
-                    sensor_link3:
-                      tof_E:
-                        {}
-                      tof_N:
-                        {}
-                      tof_S:
-                        {}
-                      tof_W:
-                        {}
-                    sensor_link3_1:
-                      tof3_1_E:
-                        {}
-                      tof3_1_N:
-                        {}
-                      tof3_1_S:
-                        {}
-                      tof3_1_W:
-                        {}
-                sensor_link2:
-                  tof2_E:
-                    {}
-                  tof2_N:
-                    {}
-                  tof2_S:
-                    {}
-                  tof2_W:
-                    {}
-                sensor_link2_1:
-                  tof2_1_E:
-                    {}
-                  tof2_1_N:
-                    {}
-                  tof2_1_S:
-                    {}
-                  tof2_1_W:
-                    {}
-          rmp_goal_target:
-            {}
+        {}
       Update Interval: 0
-      Value: true
+      Value: false
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -523,25 +216,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 1.0825624465942383
+      Distance: 1.1642727851867676
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.11120525747537613
-        Y: -0.797225832939148
-        Z: 0.5973234176635742
+        X: 0.11654697358608246
+        Y: -0.8153930306434631
+        Z: 0.5437891483306885
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.2624194025993347
+      Pitch: 0.337419331073761
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 4.88119649887085
+      Yaw: 5.126197814941406
     Saved: ~
 Window Geometry:
   Displays:
@@ -549,7 +242,7 @@ Window Geometry:
   Height: 1016
   Hide Left Dock: false
   Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd0000000100000000000001cb0000039efc0200000004fb000000100044006900730070006c006100790073010000003d0000015b000000c900fffffffb0000001200530065006c0065006300740069006f006e010000019e000000a80000005c00fffffffb0000001e0054006f006f006c002000500072006f0070006500720074006900650073010000024c000000a80000005c00fffffffb0000000a0056006900650077007301000002fa000000e1000000a400ffffff000005690000039e00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd0000000100000000000001cb0000039efc0200000004fb000000100044006900730070006c006100790073010000003d000001c8000000c900fffffffb0000001200530065006c0065006300740069006f006e010000020b000000650000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007301000002760000007e0000005c00fffffffb0000000a0056006900650077007301000002fa000000e1000000a400ffffff000005690000039e00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Tool Properties:

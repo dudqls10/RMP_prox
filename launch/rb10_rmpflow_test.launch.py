@@ -78,9 +78,6 @@ def generate_launch_description():
     bridge_max_command_step_deg = LaunchConfiguration("bridge_max_command_step_deg")
     bridge_max_command_velocity_deg_s = LaunchConfiguration("bridge_max_command_velocity_deg_s")
     bridge_large_command_jump_warn_deg = LaunchConfiguration("bridge_large_command_jump_warn_deg")
-    command_guard_max_step_rad = LaunchConfiguration("command_guard_max_step_rad")
-    command_guard_max_velocity_rad_s = LaunchConfiguration("command_guard_max_velocity_rad_s")
-    predictive_joint_limit_guard = LaunchConfiguration("predictive_joint_limit_guard")
     bridge_publish_rate = LaunchConfiguration("bridge_publish_rate")
     estimate_velocity_in_controller = LaunchConfiguration("estimate_velocity_in_controller")
     use_synced_input_velocity_filter = LaunchConfiguration("use_synced_input_velocity_filter")
@@ -134,9 +131,6 @@ def generate_launch_description():
         "enable_socket_realtime": enable_socket_realtime,
         "socket_realtime_priority": socket_realtime_priority,
         "publish_debug_joint_state_sources": publish_debug_joint_state_sources,
-        "command_guard_max_step_rad": command_guard_max_step_rad,
-        "command_guard_max_velocity_rad_s": command_guard_max_velocity_rad_s,
-        "predictive_joint_limit_guard": predictive_joint_limit_guard,
         "estimate_velocity_in_controller": estimate_velocity_in_controller,
         "use_synced_input_velocity_filter": use_synced_input_velocity_filter,
         "synced_input_velocity_filter_type": "alpha-beta",
@@ -291,6 +285,9 @@ def generate_launch_description():
             "reference_joint_state_topic": "/rb10/reference_joint_states",
             "measured_joint_state_topic": "/rb10/measured_joint_states",
             "tracking_error_topic": "/rb10/joint_tracking_error_deg",
+            "rmp_tcp_accel_topic": "/rmp_tcp_accel",
+            "tangent_escape_filter_data_topic": "/tangent_escape_filter_data",
+            "tangent_escape_filter_candidate_data_topic": "/tangent_escape_filter_candidates",
             "estimate_velocity_in_controller": estimate_velocity_in_controller,
             "use_synced_input_velocity_filter": use_synced_input_velocity_filter,
             "synced_input_velocity_filter_type": "alpha-beta",
@@ -501,7 +498,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "servo_alpha",
-            default_value="0.4",
+            default_value="0.2",
             description="ServoJ low-pass filter gain for the internal RB10 bridge.",
         ),
         DeclareLaunchArgument(
@@ -523,24 +520,6 @@ def generate_launch_description():
             "bridge_large_command_jump_warn_deg",
             default_value="2.0",
             description="Warn when the requested bridge command jumps more than this far from the current joint reference.",
-        ),
-        DeclareLaunchArgument(
-            "command_guard_max_step_rad",
-            default_value="0.00436332313",
-            description="Maximum per-cycle joint position correction applied by the direct-controller command guard, in radians.",
-        ),
-        DeclareLaunchArgument(
-            "command_guard_max_velocity_rad_s",
-            default_value="0.5",
-            description="Maximum joint velocity allowed by the direct-controller command guard, in radians per second.",
-        ),
-        DeclareLaunchArgument(
-            "predictive_joint_limit_guard",
-            default_value="true",
-            description=(
-                "In velocity command mode, clamp qd using measured_q + qd * dt so the next "
-                "commanded joint position stays inside the configured joint limits."
-            ),
         ),
         DeclareLaunchArgument(
             "startup_move_to_default_pose",

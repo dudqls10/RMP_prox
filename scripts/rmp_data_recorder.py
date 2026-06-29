@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import csv
+import json
 import math
 import os
 import threading
@@ -20,6 +21,42 @@ from visualization_msgs.msg import MarkerArray
 
 
 JOINT_NAMES = ["base", "shoulder", "elbow", "wrist1", "wrist2", "wrist3"]
+TANGENT_ESCAPE_COLUMNS = [
+    "tangent_escape_active",
+    "tangent_escape_cp_index",
+    "tangent_escape_clearance",
+    "tangent_escape_activation",
+    "tangent_escape_score",
+    "tangent_escape_has_tangent",
+    "tangent_escape_cp_x",
+    "tangent_escape_cp_y",
+    "tangent_escape_cp_z",
+    "tangent_escape_obstacle_x",
+    "tangent_escape_obstacle_y",
+    "tangent_escape_obstacle_z",
+    "tangent_escape_normal_x",
+    "tangent_escape_normal_y",
+    "tangent_escape_normal_z",
+    "tangent_escape_tangent_x",
+    "tangent_escape_tangent_y",
+    "tangent_escape_tangent_z",
+    "tangent_escape_raw_cp_accel_x_m_s2",
+    "tangent_escape_raw_cp_accel_y_m_s2",
+    "tangent_escape_raw_cp_accel_z_m_s2",
+    "tangent_escape_filtered_cp_accel_x_m_s2",
+    "tangent_escape_filtered_cp_accel_y_m_s2",
+    "tangent_escape_filtered_cp_accel_z_m_s2",
+    "tangent_escape_raw_tcp_accel_x_m_s2",
+    "tangent_escape_raw_tcp_accel_y_m_s2",
+    "tangent_escape_raw_tcp_accel_z_m_s2",
+    "tangent_escape_filtered_tcp_accel_x_m_s2",
+    "tangent_escape_filtered_tcp_accel_y_m_s2",
+    "tangent_escape_filtered_tcp_accel_z_m_s2",
+]
+TANGENT_ESCAPE_COLUMNS.extend([f"tangent_escape_raw_qdd{i + 1}" for i in range(len(JOINT_NAMES))])
+TANGENT_ESCAPE_COLUMNS.extend([
+    f"tangent_escape_filtered_qdd{i + 1}" for i in range(len(JOINT_NAMES))
+])
 
 
 class RmpDataRecorder(Node):
@@ -43,6 +80,12 @@ class RmpDataRecorder(Node):
         self.declare_parameter("reference_joint_state_topic", "/rb10/reference_joint_states")
         self.declare_parameter("measured_joint_state_topic", "/rb10/measured_joint_states")
         self.declare_parameter("tracking_error_topic", "/rb10/joint_tracking_error_deg")
+        self.declare_parameter("rmp_tcp_accel_topic", "/rmp_tcp_accel")
+        self.declare_parameter("tangent_escape_filter_data_topic", "/tangent_escape_filter_data")
+        self.declare_parameter(
+            "tangent_escape_filter_candidate_data_topic",
+            "/tangent_escape_filter_candidates",
+        )
         self.declare_parameter(
             "range_topics",
             [
@@ -87,6 +130,13 @@ class RmpDataRecorder(Node):
         self.reference_joint_state_topic = str(self.get_parameter("reference_joint_state_topic").value)
         self.measured_joint_state_topic = str(self.get_parameter("measured_joint_state_topic").value)
         self.tracking_error_topic = str(self.get_parameter("tracking_error_topic").value)
+        self.rmp_tcp_accel_topic = str(self.get_parameter("rmp_tcp_accel_topic").value)
+        self.tangent_escape_filter_data_topic = str(
+            self.get_parameter("tangent_escape_filter_data_topic").value
+        )
+        self.tangent_escape_filter_candidate_data_topic = str(
+            self.get_parameter("tangent_escape_filter_candidate_data_topic").value
+        )
         self.range_topics = list(self.get_parameter("range_topics").value)
         self.max_obstacles = int(self.get_parameter("max_obstacles").value)
         self.max_control_points = int(self.get_parameter("max_control_points").value)
@@ -144,6 +194,13 @@ class RmpDataRecorder(Node):
         self.latest_goal_pose = [float("nan")] * 7
         self.latest_ee_pose = [float("nan")] * 7
         self.latest_ee_velocity = [float("nan")] * 4
+        self.latest_tcp_accel = [float("nan")] * 4
+        self.latest_tcp_accel_direction = [float("nan")] * 3
+        self.latest_tcp_accel_time = float("nan")
+        self.latest_tangent_escape_filter_data = [float("nan")] * len(TANGENT_ESCAPE_COLUMNS)
+        self.latest_tangent_escape_filter_data_time = float("nan")
+        self.latest_tangent_escape_candidates_json = "{}"
+        self.latest_tangent_escape_candidates_time = float("nan")
         self.latest_ranges = [float("nan")] * len(self.range_topics)
         self.latest_obstacles = [[float("nan")] * 4 for _ in range(self.max_obstacles)]
         self.latest_control_points = [[float("nan")] * 4 for _ in range(self.max_control_points)]
@@ -233,6 +290,27 @@ class RmpDataRecorder(Node):
             10,
             callback_group=self.cb_group,
         )
+        self.create_subscription(
+            Float64MultiArray,
+            self.rmp_tcp_accel_topic,
+            self.on_rmp_tcp_accel,
+            10,
+            callback_group=self.cb_group,
+        )
+        self.create_subscription(
+            Float64MultiArray,
+            self.tangent_escape_filter_data_topic,
+            self.on_tangent_escape_filter_data,
+            10,
+            callback_group=self.cb_group,
+        )
+        self.create_subscription(
+            Float64MultiArray,
+            self.tangent_escape_filter_candidate_data_topic,
+            self.on_tangent_escape_filter_candidate_data,
+            10,
+            callback_group=self.cb_group,
+        )
 
         self.range_subs = []
         for index, topic in enumerate(self.range_topics):
@@ -270,6 +348,14 @@ class RmpDataRecorder(Node):
         self.get_logger().info(f"Joint topic: {self.joint_state_topic}")
         self.get_logger().info(f"Command topic: {self.command_topic}")
         self.get_logger().info(f"EE pose topic: {self.ee_pose_topic}")
+        self.get_logger().info(f"RMP TCP accel topic: {self.rmp_tcp_accel_topic}")
+        self.get_logger().info(
+            f"Tangent escape filter data topic: {self.tangent_escape_filter_data_topic}"
+        )
+        self.get_logger().info(
+            "Tangent escape candidate data topic: "
+            f"{self.tangent_escape_filter_candidate_data_topic}"
+        )
         self.get_logger().info(f"Control point topic: {self.control_point_topic}")
         self.get_logger().info(f"Output directory: {self.output_directory}")
 
@@ -500,6 +586,168 @@ class RmpDataRecorder(Node):
         with self.data_lock:
             self.latest_tracking_error_deg = tracking_error
 
+    def on_rmp_tcp_accel(self, msg: Float64MultiArray) -> None:
+        vector = [float("nan")] * 3
+        for idx, value in enumerate(list(msg.data)[:3]):
+            vector[idx] = float(value)
+
+        norm = float("nan")
+        direction = [float("nan")] * 3
+        if all(self._is_finite(value) for value in vector):
+            norm = math.sqrt(sum(value * value for value in vector))
+            if norm > 1e-9:
+                direction = [value / norm for value in vector]
+
+        with self.data_lock:
+            self.latest_tcp_accel = [*vector, norm]
+            self.latest_tcp_accel_direction = direction
+            self.latest_tcp_accel_time = time.time()
+
+    def on_tangent_escape_filter_data(self, msg: Float64MultiArray) -> None:
+        values = [float("nan")] * len(TANGENT_ESCAPE_COLUMNS)
+        for idx, value in enumerate(list(msg.data)[: len(TANGENT_ESCAPE_COLUMNS)]):
+            values[idx] = float(value)
+
+        with self.data_lock:
+            self.latest_tangent_escape_filter_data = values
+            self.latest_tangent_escape_filter_data_time = time.time()
+
+    def on_tangent_escape_filter_candidate_data(self, msg: Float64MultiArray) -> None:
+        payload = self._parse_tangent_escape_candidate_data(list(msg.data))
+        candidates_json = json.dumps(payload, separators=(",", ":"), allow_nan=False)
+        with self.data_lock:
+            self.latest_tangent_escape_candidates_json = candidates_json
+            self.latest_tangent_escape_candidates_time = time.time()
+
+    def _parse_tangent_escape_candidate_data(self, data):
+        def number(value):
+            return float(value) if self._is_finite(value) else None
+
+        def integer(value):
+            return int(round(float(value))) if self._is_finite(value) else None
+
+        if not data or data[0] < 0.5:
+            return {
+                "active": False,
+                "candidate_count": 0,
+                "selected_candidate_index": None,
+                "candidates": [],
+            }
+
+        declared_count = max(0, integer(data[1]) or 0) if len(data) > 1 else 0
+        formats = [
+            ("old_extended", 15, 22),
+            ("current", 13, 18),
+            ("old", 12, 16),
+        ]
+        format_name = "current"
+        base_size = 13
+        stride = 18
+        for candidate_format, candidate_base_size, candidate_stride in formats:
+            required_size = candidate_base_size + declared_count * candidate_stride
+            if len(data) >= required_size:
+                format_name = candidate_format
+                base_size = candidate_base_size
+                stride = candidate_stride
+                break
+        available_count = max(0, (len(data) - base_size) // stride)
+        candidate_count = min(declared_count, available_count)
+        if format_name == "old_extended":
+            weights = {
+                "goal": number(data[7]) if len(data) > 7 else None,
+                "continuity": number(data[10]) if len(data) > 10 else None,
+                "up": number(data[11]) if len(data) > 11 else None,
+                "duplicate_risk": number(data[12]) if len(data) > 12 else None,
+                "adjacent_block": number(data[13]) if len(data) > 13 else None,
+                "branch_hold": number(data[14]) if len(data) > 14 else None,
+            }
+        elif format_name == "old":
+            weights = {
+                "goal": number(data[7]) if len(data) > 7 else None,
+                "continuity": number(data[10]) if len(data) > 10 else None,
+                "up": number(data[11]) if len(data) > 11 else None,
+            }
+        else:
+            weights = {
+                "goal": number(data[7]) if len(data) > 7 else None,
+                "continuity": number(data[8]) if len(data) > 8 else None,
+                "up": number(data[9]) if len(data) > 9 else None,
+                "duplicate_risk": number(data[10]) if len(data) > 10 else None,
+                "adjacent_block": number(data[11]) if len(data) > 11 else None,
+                "branch_hold": number(data[12]) if len(data) > 12 else None,
+            }
+        payload = {
+            "active": True,
+            "candidate_count": candidate_count,
+            "selected_candidate_index": integer(data[2]) if len(data) > 2 else None,
+            "control_point_index": integer(data[3]) if len(data) > 3 else None,
+            "clearance": number(data[4]) if len(data) > 4 else None,
+            "activation": number(data[5]) if len(data) > 5 else None,
+            "pair_score": number(data[6]) if len(data) > 6 else None,
+            "weights": weights,
+            "candidates": [],
+        }
+
+        for candidate_idx in range(candidate_count):
+            offset = base_size + candidate_idx * stride
+            row = data[offset: offset + stride]
+            if format_name == "current":
+                selected_value = row[17]
+                candidate_payload = {
+                    "index": integer(row[0]),
+                    "direction": [number(row[1]), number(row[2]), number(row[3])],
+                    "goal_score": number(row[4]),
+                    "continuity_score": number(row[5]),
+                    "up_score": number(row[6]),
+                    "duplicate_risk_score": number(row[7]),
+                    "adjacent_block_score": number(row[8]),
+                    "branch_hold_score": number(row[9]),
+                    "weighted_goal": number(row[10]),
+                    "weighted_continuity": number(row[11]),
+                    "weighted_up": number(row[12]),
+                    "weighted_duplicate_risk": number(row[13]),
+                    "weighted_adjacent_block": number(row[14]),
+                    "weighted_branch_hold": number(row[15]),
+                    "total_score": number(row[16]),
+                    "selected": selected_value >= 0.5 if self._is_finite(selected_value) else False,
+                }
+            elif format_name == "old_extended":
+                selected_value = row[21]
+                candidate_payload = {
+                    "index": integer(row[0]),
+                    "direction": [number(row[1]), number(row[2]), number(row[3])],
+                    "goal_score": number(row[4]),
+                    "continuity_score": number(row[7]),
+                    "up_score": number(row[8]),
+                    "duplicate_risk_score": number(row[9]),
+                    "adjacent_block_score": number(row[10]),
+                    "branch_hold_score": number(row[11]),
+                    "weighted_goal": number(row[12]),
+                    "weighted_continuity": number(row[15]),
+                    "weighted_up": number(row[16]),
+                    "weighted_duplicate_risk": number(row[17]),
+                    "weighted_adjacent_block": number(row[18]),
+                    "weighted_branch_hold": number(row[19]),
+                    "total_score": number(row[20]),
+                    "selected": selected_value >= 0.5 if self._is_finite(selected_value) else False,
+                }
+            else:
+                selected_value = row[15]
+                candidate_payload = {
+                    "index": integer(row[0]),
+                    "direction": [number(row[1]), number(row[2]), number(row[3])],
+                    "goal_score": number(row[4]),
+                    "continuity_score": number(row[7]),
+                    "up_score": number(row[8]),
+                    "weighted_goal": number(row[9]),
+                    "weighted_continuity": number(row[12]),
+                    "weighted_up": number(row[13]),
+                    "total_score": number(row[14]),
+                    "selected": selected_value >= 0.5 if self._is_finite(selected_value) else False,
+                }
+            payload["candidates"].append(candidate_payload)
+        return payload
+
     def on_start_recording(self, request, response):
         del request
         success, message = self.start_recording()
@@ -533,6 +781,14 @@ class RmpDataRecorder(Node):
             self.recording_handle.write(f"# reference_joint_state_topic,{self.reference_joint_state_topic}\n")
             self.recording_handle.write(f"# measured_joint_state_topic,{self.measured_joint_state_topic}\n")
             self.recording_handle.write(f"# tracking_error_topic,{self.tracking_error_topic}\n")
+            self.recording_handle.write(f"# rmp_tcp_accel_topic,{self.rmp_tcp_accel_topic}\n")
+            self.recording_handle.write(
+                f"# tangent_escape_filter_data_topic,{self.tangent_escape_filter_data_topic}\n"
+            )
+            self.recording_handle.write(
+                "# tangent_escape_filter_candidate_data_topic,"
+                f"{self.tangent_escape_filter_candidate_data_topic}\n"
+            )
             self.recording_handle.write(f"# range_topics,{';'.join(self.range_topics)}\n")
             self.recording_handle.write(f"# collision_rmp_margin,{self.collision_margin}\n")
             self.recording_handle.write(
@@ -609,6 +865,21 @@ class RmpDataRecorder(Node):
             return
 
         with self.data_lock:
+            tcp_accel_age = (
+                time.time() - self.latest_tcp_accel_time
+                if self._is_finite(self.latest_tcp_accel_time)
+                else float("nan")
+            )
+            tangent_escape_filter_data_age = (
+                time.time() - self.latest_tangent_escape_filter_data_time
+                if self._is_finite(self.latest_tangent_escape_filter_data_time)
+                else float("nan")
+            )
+            tangent_escape_candidate_data_age = (
+                time.time() - self.latest_tangent_escape_candidates_time
+                if self._is_finite(self.latest_tangent_escape_candidates_time)
+                else float("nan")
+            )
             row = [
                 datetime.now().isoformat(timespec="milliseconds"),
                 f"{time.time():.6f}",
@@ -622,6 +893,13 @@ class RmpDataRecorder(Node):
                 *self.latest_goal_pose,
                 *self.latest_ee_pose,
                 *self.latest_ee_velocity,
+                tcp_accel_age,
+                *self.latest_tcp_accel,
+                *self.latest_tcp_accel_direction,
+                tangent_escape_filter_data_age,
+                *self.latest_tangent_escape_filter_data,
+                tangent_escape_candidate_data_age,
+                self.latest_tangent_escape_candidates_json,
                 *(value for point in self.latest_control_points for value in point),
                 *(value for point in self.latest_control_point_velocities for value in point),
                 *self.latest_collision_diagnostics,
@@ -702,6 +980,22 @@ class RmpDataRecorder(Node):
             "ee_pose_qw",
         ])
         header.extend(["ee_vx", "ee_vy", "ee_vz", "ee_speed"])
+        header.extend([
+            "rmp_tcp_accel_age_s",
+            "rmp_tcp_accel_x_m_s2",
+            "rmp_tcp_accel_y_m_s2",
+            "rmp_tcp_accel_z_m_s2",
+            "rmp_tcp_accel_norm",
+            "rmp_tcp_accel_dir_x",
+            "rmp_tcp_accel_dir_y",
+            "rmp_tcp_accel_dir_z",
+        ])
+        header.append("tangent_escape_age_s")
+        header.extend(TANGENT_ESCAPE_COLUMNS)
+        header.extend([
+            "tangent_escape_candidate_age_s",
+            "tangent_escape_candidates_json",
+        ])
         for idx in range(self.max_control_points):
             header.extend([
                 f"cp{idx + 1}_x",

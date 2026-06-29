@@ -2,6 +2,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
@@ -13,6 +14,7 @@
 #include "rcl_interfaces/msg/set_parameters_result.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rb10_rmpflow_rviz/rb10_model.hpp"
+#include "sensor_msgs/msg/joint_state.hpp"
 #include "sensor_msgs/msg/range.hpp"
 #include "std_msgs/msg/u_int8.hpp"
 #include "tf2/exceptions.h"
@@ -32,6 +34,14 @@ constexpr int kPatchMarkerIdBase = 10000;
 constexpr int kPatchMarkerIdStride = 100;
 constexpr int kMaxPatchMarkerCount = 49;
 constexpr int kFixedSurfaceCollisionMarkerIdBase = 200000;
+constexpr double kPi = 3.14159265358979323846;
+constexpr const char * kElbowIgnoreSensorFrame = "tof3_1_W";
+constexpr std::size_t kElbowJointIndex = 2;
+
+double degrees_to_radians(double degrees)
+{
+  return degrees * kPi / 180.0;
+}
 
 std::vector<std::string> default_range_topics()
 {
@@ -63,7 +73,9 @@ public:
   {
     declare_parameter("fixed_frame", "base_link");
     declare_parameter("obstacle_topic", "obstacles");
-    declare_parameter("publish_rate", 30.0);
+    declare_parameter("visualization_obstacle_topic", "obstacle_markers");
+    declare_parameter("publish_rate", 100.0);
+    declare_parameter("visualization_publish_rate", 20.0);
     declare_parameter("publish_collision_obstacles", true);
     declare_parameter("obstacle_radius", 0.05);
     declare_parameter("obstacle_radii", std::vector<double>{});
@@ -87,12 +99,20 @@ public:
     declare_parameter("rmp_flag_topic", "/RMP_flag");
     declare_parameter("rmp_active_flag_value", 1);
     declare_parameter("enable_proximity_distance_1_4", true);
+    declare_parameter("joint_state_topic", "joint_states");
+    declare_parameter("elbow_tof3_1_w_ignore_enabled", false);
+    declare_parameter("elbow_tof3_1_w_ignore_min_deg", -150.0);
+    declare_parameter("elbow_tof3_1_w_ignore_max_deg", -140.0);
+    declare_parameter("elbow_tof3_1_w_ignore_state_timeout", 0.5);
+    declare_parameter("elbow_tof3_1_w_ignore_clear_memory", true);
     declare_parameter("sensor_enabled", std::vector<bool>{});
     declare_parameter("range_topics", default_range_topics());
     declare_parameter("sensor_frames", default_sensor_frames());
 
     fixed_frame_ = get_parameter("fixed_frame").as_string();
     publish_collision_obstacles_ = get_parameter("publish_collision_obstacles").as_bool();
+    visualization_publish_rate_ =
+      std::max(get_parameter("visualization_publish_rate").as_double(), 0.0);
     obstacle_radius_ = get_parameter("obstacle_radius").as_double();
     surface_patch_enabled_ = get_parameter("surface_patch_enabled").as_bool();
     surface_patch_rows_ = static_cast<int>(std::clamp(
@@ -126,6 +146,21 @@ public:
     rmp_active_ = !rmp_flag_gate_enabled_;
     enable_proximity_distance_1_4_ =
       get_parameter("enable_proximity_distance_1_4").as_bool();
+    elbow_tof3_1_w_ignore_enabled_ =
+      get_parameter("elbow_tof3_1_w_ignore_enabled").as_bool();
+    const double elbow_ignore_min_deg =
+      get_parameter("elbow_tof3_1_w_ignore_min_deg").as_double();
+    const double elbow_ignore_max_deg =
+      get_parameter("elbow_tof3_1_w_ignore_max_deg").as_double();
+    elbow_tof3_1_w_ignore_min_rad_ =
+      degrees_to_radians(std::min(elbow_ignore_min_deg, elbow_ignore_max_deg));
+    elbow_tof3_1_w_ignore_max_rad_ =
+      degrees_to_radians(std::max(elbow_ignore_min_deg, elbow_ignore_max_deg));
+    elbow_tof3_1_w_ignore_state_timeout_ = std::max(
+      get_parameter("elbow_tof3_1_w_ignore_state_timeout").as_double(),
+      0.0);
+    elbow_tof3_1_w_ignore_clear_memory_ =
+      get_parameter("elbow_tof3_1_w_ignore_clear_memory").as_bool();
     range_topics_ = get_parameter("range_topics").as_string_array();
     sensor_frames_ = get_parameter("sensor_frames").as_string_array();
     const auto obstacle_radii = get_parameter("obstacle_radii").as_double_array();
@@ -166,6 +201,11 @@ public:
       obstacle_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
         get_parameter("obstacle_topic").as_string(),
         10);
+      if (visualization_publish_rate_ > 0.0) {
+        visualization_obstacle_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+          get_parameter("visualization_obstacle_topic").as_string(),
+          10);
+      }
     }
     if (surface_patch_fixed_visualization_) {
       surface_patch_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
@@ -178,6 +218,12 @@ public:
         get_parameter("rmp_flag_topic").as_string(),
         10,
         std::bind(&ProximityObstacleBridgeNode::on_rmp_flag, this, std::placeholders::_1));
+    }
+    if (elbow_tof3_1_w_ignore_enabled_) {
+      joint_state_sub_ = create_subscription<sensor_msgs::msg::JointState>(
+        get_parameter("joint_state_topic").as_string(),
+        10,
+        std::bind(&ProximityObstacleBridgeNode::on_joint_state, this, std::placeholders::_1));
     }
 
     range_subs_.resize(range_topics_.size());
@@ -215,6 +261,15 @@ private:
 
     visualization_msgs::msg::MarkerArray msg;
     const auto stamp = now();
+    const bool ignore_tof3_1_w_this_cycle = should_ignore_tof3_1_w(stamp);
+    if (
+      ignore_tof3_1_w_this_cycle &&
+      elbow_tof3_1_w_ignore_clear_memory_ &&
+      erase_fixed_surface_patches_for_sensor(kElbowIgnoreSensorFrame) &&
+      publish_collision_this_cycle)
+    {
+      append_delete_all_marker(msg, stamp);
+    }
 
     for (std::size_t index = 0; index < latest_ranges_.size(); ++index) {
       visualization_msgs::msg::Marker marker;
@@ -224,6 +279,13 @@ private:
       marker.id = static_cast<int32_t>(index);
       marker.type = visualization_msgs::msg::Marker::SPHERE;
       marker.text = sensor_frames_[index];
+
+      if (ignore_tof3_1_w_this_cycle && sensor_frames_[index] == kElbowIgnoreSensorFrame) {
+        if (publish_collision_this_cycle) {
+          append_delete_markers(msg, index, stamp);
+        }
+        continue;
+      }
 
       if (!range_topic_enabled(index)) {
         if (publish_collision_this_cycle) {
@@ -310,13 +372,51 @@ private:
     if (publish_collision_this_cycle && surface_patch_collision_memory_enabled_) {
       append_fixed_surface_collision_markers(msg, stamp);
     }
+    const bool publish_visualization_this_cycle = should_publish_visualization();
     if (publish_collision_this_cycle && obstacle_pub_) {
       obstacle_pub_->publish(msg);
     }
-    publish_fixed_surface_patches(stamp);
+    if (publish_collision_this_cycle && visualization_obstacle_pub_ && publish_visualization_this_cycle) {
+      visualization_obstacle_pub_->publish(msg);
+    }
+    if (publish_visualization_this_cycle) {
+      publish_fixed_surface_patches(stamp);
+    }
     if (publish_collision_this_cycle) {
       obstacles_cleared_for_inactive_ = false;
     }
+  }
+
+  void on_joint_state(const sensor_msgs::msg::JointState::SharedPtr msg)
+  {
+    std::optional<std::size_t> elbow_index;
+    if (msg->name.size() == msg->position.size()) {
+      const auto it = std::find(
+        msg->name.begin(),
+        msg->name.end(),
+        std::string(RB10Model::joint_names[kElbowJointIndex]));
+      if (it != msg->name.end()) {
+        elbow_index = static_cast<std::size_t>(std::distance(msg->name.begin(), it));
+      }
+    }
+    if (!elbow_index.has_value() && msg->position.size() > kElbowJointIndex) {
+      elbow_index = kElbowJointIndex;
+    }
+    if (!elbow_index.has_value()) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(),
+        *get_clock(),
+        5000,
+        "joint state for elbow ignore is missing elbow position");
+      return;
+    }
+
+    const double elbow_position = msg->position[*elbow_index];
+    if (!std::isfinite(elbow_position)) {
+      return;
+    }
+    latest_elbow_position_rad_ = elbow_position;
+    latest_elbow_state_time_ = now();
   }
 
   void on_rmp_flag(const std_msgs::msg::UInt8::SharedPtr msg)
@@ -451,6 +551,18 @@ private:
           patch_marker_id(sensor_index, patch_index),
           stamp));
     }
+  }
+
+  void append_delete_all_marker(
+    visualization_msgs::msg::MarkerArray & msg,
+    const rclcpp::Time & stamp) const
+  {
+    visualization_msgs::msg::Marker marker;
+    marker.header.frame_id = fixed_frame_;
+    marker.header.stamp = stamp;
+    marker.ns = "proximity_obstacles";
+    marker.action = visualization_msgs::msg::Marker::DELETEALL;
+    msg.markers.push_back(marker);
   }
 
   double surface_patch_radius(std::size_t sensor_index) const
@@ -593,6 +705,25 @@ private:
     }
   }
 
+  bool erase_fixed_surface_patches_for_sensor(const std::string & sensor_frame)
+  {
+    const auto old_size = fixed_surface_patches_.size();
+    fixed_surface_patches_.erase(
+      std::remove_if(
+        fixed_surface_patches_.begin(),
+        fixed_surface_patches_.end(),
+        [&sensor_frame](const FixedSurfacePatch & patch) {
+          return patch.sensor_frame == sensor_frame;
+        }),
+      fixed_surface_patches_.end());
+    if (fixed_surface_patches_.size() == old_size) {
+      return false;
+    }
+
+    fixed_surface_markers_cleared_ = false;
+    return true;
+  }
+
   void publish_fixed_surface_patches(const rclcpp::Time & stamp)
   {
     if (!surface_patch_pub_) {
@@ -696,7 +827,7 @@ private:
 
   void clear_obstacles_once()
   {
-    if (!obstacle_pub_ || obstacles_cleared_for_inactive_) {
+    if (obstacles_cleared_for_inactive_) {
       return;
     }
 
@@ -707,8 +838,60 @@ private:
 
     visualization_msgs::msg::MarkerArray clear_array;
     clear_array.markers.push_back(clear_marker);
-    obstacle_pub_->publish(clear_array);
+    bool published_clear = false;
+    if (obstacle_pub_) {
+      obstacle_pub_->publish(clear_array);
+      published_clear = true;
+    }
+    if (visualization_obstacle_pub_) {
+      visualization_obstacle_pub_->publish(clear_array);
+      published_clear = true;
+    }
+    if (!published_clear) {
+      return;
+    }
     obstacles_cleared_for_inactive_ = true;
+  }
+
+  bool should_publish_visualization()
+  {
+    if (visualization_publish_rate_ <= 0.0) {
+      return false;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const auto period = std::chrono::duration<double>(1.0 / visualization_publish_rate_);
+    if (
+      last_visualization_publish_time_.time_since_epoch().count() != 0 &&
+      now - last_visualization_publish_time_ < period)
+    {
+      return false;
+    }
+
+    last_visualization_publish_time_ = now;
+    return true;
+  }
+
+  bool should_ignore_tof3_1_w(const rclcpp::Time & stamp) const
+  {
+    if (
+      !elbow_tof3_1_w_ignore_enabled_ ||
+      !latest_elbow_position_rad_.has_value() ||
+      !latest_elbow_state_time_.has_value())
+    {
+      return false;
+    }
+
+    if (elbow_tof3_1_w_ignore_state_timeout_ > 0.0) {
+      const double age = (stamp - *latest_elbow_state_time_).seconds();
+      if (age < 0.0 || age > elbow_tof3_1_w_ignore_state_timeout_) {
+        return false;
+      }
+    }
+
+    return
+      *latest_elbow_position_rad_ >= elbow_tof3_1_w_ignore_min_rad_ &&
+      *latest_elbow_position_rad_ <= elbow_tof3_1_w_ignore_max_rad_;
   }
 
   bool range_is_usable(const sensor_msgs::msg::Range & msg) const
@@ -758,6 +941,7 @@ private:
 
   std::string fixed_frame_;
   bool publish_collision_obstacles_{true};
+  double visualization_publish_rate_{20.0};
   double obstacle_radius_{0.05};
   bool surface_patch_enabled_{false};
   int surface_patch_rows_{5};
@@ -777,6 +961,11 @@ private:
   bool rmp_flag_gate_enabled_{false};
   bool rmp_active_{true};
   bool enable_proximity_distance_1_4_{true};
+  bool elbow_tof3_1_w_ignore_enabled_{false};
+  bool elbow_tof3_1_w_ignore_clear_memory_{true};
+  double elbow_tof3_1_w_ignore_min_rad_{degrees_to_radians(-150.0)};
+  double elbow_tof3_1_w_ignore_max_rad_{degrees_to_radians(-140.0)};
+  double elbow_tof3_1_w_ignore_state_timeout_{0.5};
   bool obstacles_cleared_for_inactive_{false};
   int rmp_active_flag_value_{1};
   std::vector<std::string> range_topics_;
@@ -786,13 +975,18 @@ private:
   std::vector<double> trigger_distances_;
   std::vector<std::optional<sensor_msgs::msg::Range>> latest_ranges_;
   std::vector<FixedSurfacePatch> fixed_surface_patches_;
+  std::optional<double> latest_elbow_position_rad_;
+  std::optional<rclcpp::Time> latest_elbow_state_time_;
+  std::chrono::steady_clock::time_point last_visualization_publish_time_{};
 
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr flag_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::Range>::SharedPtr> range_subs_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameters_callback_handle_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr obstacle_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr visualization_obstacle_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr surface_patch_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };

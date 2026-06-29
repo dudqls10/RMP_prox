@@ -286,9 +286,12 @@ install(
     scripts/rmpflow_trace_logger.py
     scripts/rmp_goal_sequence_visualizer.py
     scripts/plot_joint_velocity_log.py
-    scripts/experiment_goal_runner.py
-    scripts/plot_ee_trajectory_3d.py
-    scripts/plot_velocity_filter_comparison.py
+	    scripts/experiment_goal_runner.py
+	    scripts/plot_ee_trajectory_3d.py
+	    scripts/plot_tcp_accel_direction.py
+	    scripts/plot_tangent_escape_filter_debug.py
+	    scripts/plot_tangent_escape_filter_report.py
+	    scripts/plot_velocity_filter_comparison.py
     scripts/plot_velocity_dataset_comparison.py
   DESTINATION lib/${PROJECT_NAME}
 )

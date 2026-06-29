@@ -117,6 +117,30 @@ struct TcpAccelerationSample
   bool valid{false};
 };
 
+struct TangentEscapeDebugSample
+{
+  std::size_t control_point_index{0};
+  Eigen::Vector3d control_point{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d obstacle_center{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d normal{Eigen::Vector3d::UnitZ()};
+  Eigen::Vector3d tangent{Eigen::Vector3d::UnitX()};
+  Eigen::Vector3d raw_accel{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d filtered_accel{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d raw_tcp_accel{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d filtered_tcp_accel{Eigen::Vector3d::Zero()};
+  JointVector qdd_raw{JointVector::Zero()};
+  JointVector qdd_filtered{JointVector::Zero()};
+  double clearance{0.0};
+  double activation{0.0};
+  double score{0.0};
+  bool has_tangent{false};
+};
+
+struct TangentEscapeDebugState
+{
+  std::vector<TangentEscapeDebugSample> samples;
+};
+
 class SynchronizedVelocityFilter
 {
 public:
@@ -951,9 +975,9 @@ private:
   bool publish_debug_joint_state_sources_{false};
   CommandMode command_mode_{CommandMode::kPosition};
   double servo_t1_{0.002};
-  double servo_t2_{0.03};
-  double servo_gain_{0.06};
-  double servo_alpha_{0.45};
+  double servo_t2_{0.1};
+  double servo_gain_{0.02};
+  double servo_alpha_{0.2};
   double speedj_t1_{0.02};
   double speedj_t2_{0.2};
   double speedj_gain_{0.05};
@@ -1029,6 +1053,12 @@ public:
     declare_parameter("orientation_goal", std::vector<double>{0.0, 0.0, 1.0});
     declare_parameter("initial_q", std::vector<double>{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
     declare_parameter("default_q", std::vector<double>{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    declare_parameter(
+      "joint_lower_limits_deg",
+      std::vector<double>{-180.0, -180.0, -180.0, -180.0, -180.0, -180.0});
+    declare_parameter(
+      "joint_upper_limits_deg",
+      std::vector<double>{180.0, 180.0, 180.0, 180.0, 180.0, 180.0});
     declare_parameter("joint_limit_buffers", std::vector<double>{0.01, 0.01, 0.01, 0.01, 0.01, 0.01});
     declare_parameter("backend_mode", "simulation");
     declare_parameter("command_mode", "velocity");
@@ -1061,6 +1091,11 @@ public:
     declare_parameter("publish_joint_states", true);
     declare_parameter("joint_state_publish_topic", "joint_states");
     declare_parameter("publish_visualization", true);
+    declare_parameter("publish_goal_marker", true);
+    declare_parameter("publish_control_point_markers", true);
+    declare_parameter("publish_body_obstacle_markers", true);
+    declare_parameter("publish_end_effector_pose", true);
+    declare_parameter("publish_debug_state", true);
     declare_parameter("publish_repulsion_metric_markers", true);
     declare_parameter("control_point_marker_diameter", 0.10);
     declare_parameter("repulsion_metric_marker_topic", "repulsion_metric_markers");
@@ -1071,14 +1106,45 @@ public:
     declare_parameter("tcp_accel_marker_max_length", 0.15);
     declare_parameter("tcp_accel_marker_norm_for_max_length", 2.0);
     declare_parameter("tcp_accel_marker_min_norm", 0.001);
+	    declare_parameter("enable_tangent_escape_filter", false);
+    declare_parameter("enable_tangent_escape_rmp", false);
+    declare_parameter("tangent_escape_rmp_metric_scalar", 0.0);
+    declare_parameter("tangent_escape_rmp_normal_metric_scalar", 0.0);
+    declare_parameter("tangent_escape_rmp_damping_gain", 0.0);
+	    declare_parameter("tangent_escape_filter_safe_distance", 0.08);
+    declare_parameter("tangent_escape_filter_influence_distance", 0.25);
+    declare_parameter("tangent_escape_filter_tangent_gain", 2.0);
+    declare_parameter("tangent_escape_filter_normal_gain", 0.0);
+    declare_parameter("tangent_escape_filter_damping", 0.02);
+    declare_parameter("tangent_escape_filter_max_delta_qdd", 8.0);
+    declare_parameter("tangent_escape_filter_candidate_count", 16);
+    declare_parameter("tangent_escape_filter_candidate_lookahead", 0.08);
+    declare_parameter("tangent_escape_filter_goal_weight", 1.0);
+    declare_parameter("tangent_escape_filter_continuity_weight", 0.5);
+    declare_parameter("tangent_escape_filter_up_weight", 0.0);
+    declare_parameter("tangent_escape_filter_duplicate_risk_weight", 2.0);
+    declare_parameter("tangent_escape_filter_adjacent_block_weight", 1.0);
+    declare_parameter("tangent_escape_filter_branch_hold_weight", 0.5);
+    declare_parameter("tangent_escape_filter_min_activation", 0.05);
+    declare_parameter("tangent_escape_filter_min_tangent_norm", 1e-4);
+    declare_parameter("tangent_escape_filter_goal_normal_dot_threshold", 1.0);
+    declare_parameter("publish_tangent_escape_filter_debug", false);
+    declare_parameter("tangent_escape_filter_marker_topic", "tangent_escape_filter_markers");
+    declare_parameter("tangent_escape_filter_marker_length", 0.12);
+    declare_parameter("publish_tangent_escape_filter_data", false);
+    declare_parameter("tangent_escape_filter_data_topic", "/tangent_escape_filter_data");
+    declare_parameter("publish_tangent_escape_filter_candidate_data", false);
+    declare_parameter(
+      "tangent_escape_filter_candidate_data_topic",
+      "/tangent_escape_filter_candidates");
     declare_parameter("publish_rmp_ee_pose", true);
     declare_parameter("publish_goal_tf", true);
     declare_parameter("goal_tf_parent_frame", "base_link");
     declare_parameter("goal_tf_child_frame", "rmp_goal_target");
     declare_parameter("servo_t1", 0.002);
-    declare_parameter("servo_t2", 0.03);
-    declare_parameter("servo_gain", 0.06);
-    declare_parameter("servo_alpha", 0.45);
+    declare_parameter("servo_t2", 0.1);
+    declare_parameter("servo_gain", 0.02);
+    declare_parameter("servo_alpha", 0.2);
     declare_parameter("speedj_t1", 0.02);
     declare_parameter("speedj_t2", 0.2);
     declare_parameter("speedj_gain", 0.05);
@@ -1166,22 +1232,6 @@ public:
     declare_parameter("collision_rmp_metric_scalar", 1.0);
     declare_parameter("collision_rmp_metric_exploder_std_dev", 0.02);
     declare_parameter("collision_rmp_metric_exploder_eps", 0.001);
-    declare_parameter("custom_avoidance_rmp_margin", 0.0);
-    declare_parameter("custom_avoidance_rmp_influence_distance", 0.3);
-    declare_parameter("custom_avoidance_rmp_metric_scalar", 1.0);
-    declare_parameter("custom_avoidance_rmp_metric_exploder_std_dev", 0.02);
-    declare_parameter("custom_avoidance_rmp_metric_exploder_eps", 0.001);
-    declare_parameter("custom_avoidance_rmp_up_speed", 0.08);
-    declare_parameter("custom_avoidance_rmp_up_gain", 4.0);
-    declare_parameter("custom_avoidance_rmp_safe_distance", 0.10);
-    declare_parameter("custom_avoidance_rmp_safe_gain", 5.0);
-    declare_parameter("custom_avoidance_rmp_normal_damping_gain", 50.0);
-    declare_parameter("custom_avoidance_rmp_max_accel", 2.0);
-    declare_parameter("custom_avoidance_rmp_candidate_lookahead", 0.08);
-    declare_parameter("custom_avoidance_rmp_goal_weight", 1.0);
-    declare_parameter("custom_avoidance_rmp_clearance_weight", 1.0);
-    declare_parameter("custom_avoidance_rmp_velocity_weight", 0.25);
-    declare_parameter("custom_avoidance_rmp_toward_penalty_weight", 2.0);
     declare_parameter("damping_rmp_accel_d_gain", 30.0);
     declare_parameter("damping_rmp_metric_scalar", 0.005);
     declare_parameter("damping_rmp_inertia", 0.3);
@@ -1232,6 +1282,18 @@ public:
       configured_max_velocity,
       command_mode_ == CommandMode::kVelocity ? 1e-4 : command_guard_max_step_rad_ * control_rate_hz_);
     predictive_joint_limit_guard_ = get_parameter("predictive_joint_limit_guard").as_bool();
+    joint_lower_limits_ = parse_joint_limit_degrees(
+      "joint_lower_limits_deg",
+      RB10Model::joint_lower_limits);
+    joint_upper_limits_ = parse_joint_limit_degrees(
+      "joint_upper_limits_deg",
+      RB10Model::joint_upper_limits);
+    for (std::size_t index = 0; index < joint_lower_limits_.size(); ++index) {
+      if (joint_lower_limits_[index] >= joint_upper_limits_[index]) {
+        throw std::runtime_error(
+                "joint_lower_limits_deg must be less than joint_upper_limits_deg for every joint");
+      }
+    }
     const auto joint_limit_buffers = get_parameter("joint_limit_buffers").as_double_array();
     for (std::size_t index = 0; index < std::min<std::size_t>(joint_limit_buffers.size(), 6); ++index) {
       joint_limit_buffers_[index] = std::max(0.0, joint_limit_buffers[index]);
@@ -1252,16 +1314,26 @@ public:
     proximity_sensor_obstacles_box_.set(
       std::vector<std::optional<ObstacleSphere>>(RB10Model::sensor_control_points.size()));
     tcp_accel_visualization_box_.set(TcpAccelerationSample{});
+    tangent_escape_debug_box_.set(TangentEscapeDebugState{});
     const auto solver_config = build_solver_config();
     target_metric_params_ = solver_config.target;
-    collision_metric_params_ = solver_config.collision.policy == "custom_avoidance" ?
-      solver_config.custom_avoidance : solver_config.collision;
+    collision_metric_params_ = solver_config.collision;
     configure_external_rmp_inputs(solver_config.graph_nodes);
     solver_ = build_solver(solver_config);
     body_obstacles_visual_ = solver_config.body_obstacles;
 
     publish_joint_states_enabled_ = get_parameter("publish_joint_states").as_bool();
     publish_visualization_enabled_ = get_parameter("publish_visualization").as_bool();
+    publish_goal_marker_enabled_ =
+      get_parameter("publish_goal_marker").as_bool();
+    publish_control_point_markers_enabled_ =
+      get_parameter("publish_control_point_markers").as_bool();
+    publish_body_obstacle_markers_enabled_ =
+      get_parameter("publish_body_obstacle_markers").as_bool();
+    publish_end_effector_pose_enabled_ =
+      get_parameter("publish_end_effector_pose").as_bool();
+    publish_debug_state_enabled_ =
+      get_parameter("publish_debug_state").as_bool();
     publish_repulsion_metric_markers_enabled_ =
       get_parameter("publish_repulsion_metric_markers").as_bool();
     control_point_marker_diameter_ =
@@ -1278,6 +1350,51 @@ public:
       get_parameter("tcp_accel_marker_norm_for_max_length").as_double(), 1e-9);
     tcp_accel_marker_min_norm_ = std::max(
       get_parameter("tcp_accel_marker_min_norm").as_double(), 0.0);
+    enable_tangent_escape_filter_ =
+      get_parameter("enable_tangent_escape_filter").as_bool();
+    tangent_escape_safe_distance_ = std::max(
+      get_parameter("tangent_escape_filter_safe_distance").as_double(), 0.0);
+    tangent_escape_influence_distance_ = std::max(
+      get_parameter("tangent_escape_filter_influence_distance").as_double(),
+      tangent_escape_safe_distance_ + 1e-6);
+    tangent_escape_tangent_gain_ = std::max(
+      get_parameter("tangent_escape_filter_tangent_gain").as_double(), 0.0);
+    tangent_escape_normal_gain_ = std::max(
+      get_parameter("tangent_escape_filter_normal_gain").as_double(), 0.0);
+    tangent_escape_damping_ = std::max(
+      get_parameter("tangent_escape_filter_damping").as_double(), 1e-6);
+    tangent_escape_max_delta_qdd_ = std::max(
+      get_parameter("tangent_escape_filter_max_delta_qdd").as_double(), 0.0);
+    tangent_escape_candidate_count_ = std::max(
+      static_cast<int>(get_parameter("tangent_escape_filter_candidate_count").as_int()), 4);
+    tangent_escape_candidate_lookahead_ = std::max(
+      get_parameter("tangent_escape_filter_candidate_lookahead").as_double(), 1e-4);
+    tangent_escape_goal_weight_ =
+      get_parameter("tangent_escape_filter_goal_weight").as_double();
+    tangent_escape_continuity_weight_ =
+      get_parameter("tangent_escape_filter_continuity_weight").as_double();
+    tangent_escape_up_weight_ =
+      get_parameter("tangent_escape_filter_up_weight").as_double();
+    tangent_escape_duplicate_risk_weight_ =
+      get_parameter("tangent_escape_filter_duplicate_risk_weight").as_double();
+    tangent_escape_adjacent_block_weight_ =
+      get_parameter("tangent_escape_filter_adjacent_block_weight").as_double();
+    tangent_escape_branch_hold_weight_ =
+      get_parameter("tangent_escape_filter_branch_hold_weight").as_double();
+    tangent_escape_min_activation_ = std::clamp(
+      get_parameter("tangent_escape_filter_min_activation").as_double(), 0.0, 1.0);
+    tangent_escape_min_tangent_norm_ = std::max(
+      get_parameter("tangent_escape_filter_min_tangent_norm").as_double(), 1e-9);
+    tangent_escape_goal_normal_dot_threshold_ =
+      get_parameter("tangent_escape_filter_goal_normal_dot_threshold").as_double();
+    publish_tangent_escape_filter_debug_enabled_ =
+      get_parameter("publish_tangent_escape_filter_debug").as_bool();
+    tangent_escape_marker_length_ = std::max(
+      get_parameter("tangent_escape_filter_marker_length").as_double(), 0.01);
+    publish_tangent_escape_filter_data_enabled_ =
+      get_parameter("publish_tangent_escape_filter_data").as_bool();
+    publish_tangent_escape_filter_candidate_data_enabled_ =
+      get_parameter("publish_tangent_escape_filter_candidate_data").as_bool();
     publish_rmp_ee_pose_enabled_ = get_parameter("publish_rmp_ee_pose").as_bool();
     publish_goal_tf_enabled_ = get_parameter("publish_goal_tf").as_bool();
     goal_tf_parent_frame_ = get_parameter("goal_tf_parent_frame").as_string();
@@ -1321,12 +1438,31 @@ public:
         get_parameter("rmp_tcp_accel_topic").as_string(), 10);
       rt_rmp_tcp_accel_pub_ = std::make_shared<Float64ArrayRtPublisher>(rmp_tcp_accel_pub_);
     }
+    if (publish_tangent_escape_filter_data_enabled_) {
+      tangent_escape_filter_data_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
+        get_parameter("tangent_escape_filter_data_topic").as_string(), 10);
+      rt_tangent_escape_filter_data_pub_ =
+        std::make_shared<Float64ArrayRtPublisher>(tangent_escape_filter_data_pub_);
+    }
+    if (publish_tangent_escape_filter_candidate_data_enabled_) {
+      tangent_escape_filter_candidate_data_pub_ =
+        create_publisher<std_msgs::msg::Float64MultiArray>(
+          get_parameter("tangent_escape_filter_candidate_data_topic").as_string(), 10);
+      rt_tangent_escape_filter_candidate_data_pub_ =
+        std::make_shared<Float64ArrayRtPublisher>(tangent_escape_filter_candidate_data_pub_);
+    }
     if (publish_visualization_enabled_) {
-      goal_marker_pub_ = create_publisher<visualization_msgs::msg::Marker>("goal_marker", 10);
-      control_point_pub_ =
-        create_publisher<visualization_msgs::msg::MarkerArray>("control_points", 10);
-      body_obstacle_pub_ =
-        create_publisher<visualization_msgs::msg::MarkerArray>("body_obstacle_markers", 10);
+      if (publish_goal_marker_enabled_) {
+        goal_marker_pub_ = create_publisher<visualization_msgs::msg::Marker>("goal_marker", 10);
+      }
+      if (publish_control_point_markers_enabled_) {
+        control_point_pub_ =
+          create_publisher<visualization_msgs::msg::MarkerArray>("control_points", 10);
+      }
+      if (publish_body_obstacle_markers_enabled_) {
+        body_obstacle_pub_ =
+          create_publisher<visualization_msgs::msg::MarkerArray>("body_obstacle_markers", 10);
+      }
       if (publish_repulsion_metric_markers_enabled_) {
         repulsion_metric_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
           get_parameter("repulsion_metric_marker_topic").as_string(), 10);
@@ -1335,9 +1471,19 @@ public:
         tcp_accel_pub_ = create_publisher<visualization_msgs::msg::Marker>(
           get_parameter("tcp_accel_marker_topic").as_string(), 10);
       }
-      eef_pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>("end_effector_pose", 10);
-      debug_state_pub_ =
-        create_publisher<std_msgs::msg::Float64MultiArray>("rmp_debug_state", 10);
+      if (publish_tangent_escape_filter_debug_enabled_) {
+        tangent_escape_debug_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+          get_parameter("tangent_escape_filter_marker_topic").as_string(), 10);
+      }
+      if (publish_end_effector_pose_enabled_) {
+        eef_pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
+          "end_effector_pose",
+          10);
+      }
+      if (publish_debug_state_enabled_) {
+        debug_state_pub_ =
+          create_publisher<std_msgs::msg::Float64MultiArray>("rmp_debug_state", 10);
+      }
     }
     if (publish_rmp_ee_pose_enabled_) {
       rmp_eef_pose_pub_ = create_publisher<geometry_msgs::msg::Pose>("rmp_ee_pose", 10);
@@ -1543,17 +1689,21 @@ private:
       if (marker.action != visualization_msgs::msg::Marker::ADD) {
         continue;
       }
-      const Eigen::Vector3d marker_center(
-        marker.pose.position.x,
-        marker.pose.position.y,
-        marker.pose.position.z);
-      const double obstacle_radius = 0.5 * std::max(marker.scale.x, marker.scale.y);
-      ObstacleSphere obstacle{marker_center, obstacle_radius};
+	      const Eigen::Vector3d marker_center(
+	        marker.pose.position.x,
+	        marker.pose.position.y,
+	        marker.pose.position.z);
+	      const double obstacle_radius = 0.5 * std::max(marker.scale.x, marker.scale.y);
+	      ObstacleSphere obstacle{marker_center, obstacle_radius};
+      if (proximity_control_point_index.has_value()) {
+        obstacle.proximity_control_point_index =
+          static_cast<int>(proximity_control_point_index.value());
+      }
 
-      if (
-        marker.type == visualization_msgs::msg::Marker::CYLINDER &&
-        marker.scale.z > obstacle_radius * 2.0)
-      {
+	      if (
+	        marker.type == visualization_msgs::msg::Marker::CYLINDER &&
+	        marker.scale.z > obstacle_radius * 2.0)
+	      {
         Eigen::Quaterniond orientation(
           marker.pose.orientation.w,
           marker.pose.orientation.x,
@@ -1568,16 +1718,19 @@ private:
         const double spacing = std::max(obstacle_radius, 0.02);
         const int sphere_count =
           std::clamp(static_cast<int>(std::ceil(height / spacing)) + 1, 2, 64);
-        const double step = height / static_cast<double>(sphere_count - 1);
-        for (int index = 0; index < sphere_count; ++index) {
-          const double offset = -0.5 * height + step * static_cast<double>(index);
-          obstacles.push_back(ObstacleSphere{
-              marker_center + offset * cylinder_axis,
-              obstacle_radius});
-        }
-      } else {
-        obstacles.push_back(obstacle);
-      }
+	        const double step = height / static_cast<double>(sphere_count - 1);
+	        for (int index = 0; index < sphere_count; ++index) {
+	          const double offset = -0.5 * height + step * static_cast<double>(index);
+          ObstacleSphere cylinder_obstacle{
+            marker_center + offset * cylinder_axis,
+            obstacle_radius};
+          cylinder_obstacle.proximity_control_point_index =
+            obstacle.proximity_control_point_index;
+	          obstacles.push_back(cylinder_obstacle);
+	        }
+	      } else {
+	        obstacles.push_back(obstacle);
+	      }
       if (proximity_control_point_index.has_value()) {
         proximity_sensor_obstacles[proximity_control_point_index.value()] = obstacle;
       }
@@ -1621,6 +1774,8 @@ private:
     for (std::size_t index = 0; index < std::min<std::size_t>(default_q.size(), 6); ++index) {
       config.default_q[index] = default_q[index];
     }
+    config.joint_lower_limits = joint_lower_limits_;
+    config.joint_upper_limits = joint_upper_limits_;
 
     const auto joint_limit_buffers = get_parameter("joint_limit_buffers").as_double_array();
     for (std::size_t index = 0; index < std::min<std::size_t>(joint_limit_buffers.size(), 6); ++index) {
@@ -1713,44 +1868,48 @@ private:
       get_parameter("collision_rmp_metric_scalar").as_double();
     config.collision.metric_exploder_std_dev =
       get_parameter("collision_rmp_metric_exploder_std_dev").as_double();
-    config.collision.metric_exploder_eps =
-      get_parameter("collision_rmp_metric_exploder_eps").as_double();
+	    config.collision.metric_exploder_eps =
+	      get_parameter("collision_rmp_metric_exploder_eps").as_double();
 
-    config.custom_avoidance.policy = "custom_avoidance";
-    config.custom_avoidance.margin =
-      get_parameter("custom_avoidance_rmp_margin").as_double();
-    config.custom_avoidance.damping_gain =
-      get_parameter("custom_avoidance_rmp_normal_damping_gain").as_double();
-    config.custom_avoidance.metric_modulation_radius =
-      get_parameter("custom_avoidance_rmp_influence_distance").as_double();
-    config.custom_avoidance.metric_scalar =
-      get_parameter("custom_avoidance_rmp_metric_scalar").as_double();
-    config.custom_avoidance.metric_exploder_std_dev =
-      get_parameter("custom_avoidance_rmp_metric_exploder_std_dev").as_double();
-    config.custom_avoidance.metric_exploder_eps =
-      get_parameter("custom_avoidance_rmp_metric_exploder_eps").as_double();
-    config.custom_avoidance.up_speed =
-      get_parameter("custom_avoidance_rmp_up_speed").as_double();
-    config.custom_avoidance.up_gain =
-      get_parameter("custom_avoidance_rmp_up_gain").as_double();
-    config.custom_avoidance.safe_distance =
-      get_parameter("custom_avoidance_rmp_safe_distance").as_double();
-    config.custom_avoidance.safe_gain =
-      get_parameter("custom_avoidance_rmp_safe_gain").as_double();
-    config.custom_avoidance.max_accel =
-      get_parameter("custom_avoidance_rmp_max_accel").as_double();
-    config.custom_avoidance.candidate_lookahead =
-      get_parameter("custom_avoidance_rmp_candidate_lookahead").as_double();
-    config.custom_avoidance.goal_weight =
-      get_parameter("custom_avoidance_rmp_goal_weight").as_double();
-    config.custom_avoidance.clearance_weight =
-      get_parameter("custom_avoidance_rmp_clearance_weight").as_double();
-    config.custom_avoidance.velocity_weight =
-      get_parameter("custom_avoidance_rmp_velocity_weight").as_double();
-    config.custom_avoidance.toward_penalty_weight =
-      get_parameter("custom_avoidance_rmp_toward_penalty_weight").as_double();
+    config.tangent_escape.enabled = get_parameter("enable_tangent_escape_rmp").as_bool();
+    config.tangent_escape.metric_scalar =
+      get_parameter("tangent_escape_rmp_metric_scalar").as_double();
+    config.tangent_escape.normal_metric_scalar =
+      get_parameter("tangent_escape_rmp_normal_metric_scalar").as_double();
+    config.tangent_escape.damping_gain =
+      get_parameter("tangent_escape_rmp_damping_gain").as_double();
+    config.tangent_escape.safe_distance =
+      get_parameter("tangent_escape_filter_safe_distance").as_double();
+    config.tangent_escape.influence_distance =
+      get_parameter("tangent_escape_filter_influence_distance").as_double();
+    config.tangent_escape.tangent_gain =
+      get_parameter("tangent_escape_filter_tangent_gain").as_double();
+    config.tangent_escape.normal_gain =
+      get_parameter("tangent_escape_filter_normal_gain").as_double();
+    config.tangent_escape.candidate_count =
+      std::max(static_cast<int>(get_parameter("tangent_escape_filter_candidate_count").as_int()), 4);
+    config.tangent_escape.candidate_lookahead =
+      get_parameter("tangent_escape_filter_candidate_lookahead").as_double();
+    config.tangent_escape.goal_weight =
+      get_parameter("tangent_escape_filter_goal_weight").as_double();
+    config.tangent_escape.continuity_weight =
+      get_parameter("tangent_escape_filter_continuity_weight").as_double();
+    config.tangent_escape.up_weight =
+      get_parameter("tangent_escape_filter_up_weight").as_double();
+    config.tangent_escape.duplicate_risk_weight =
+      get_parameter("tangent_escape_filter_duplicate_risk_weight").as_double();
+    config.tangent_escape.adjacent_block_weight =
+      get_parameter("tangent_escape_filter_adjacent_block_weight").as_double();
+    config.tangent_escape.branch_hold_weight =
+      get_parameter("tangent_escape_filter_branch_hold_weight").as_double();
+    config.tangent_escape.min_activation =
+      get_parameter("tangent_escape_filter_min_activation").as_double();
+    config.tangent_escape.min_tangent_norm =
+      get_parameter("tangent_escape_filter_min_tangent_norm").as_double();
+    config.tangent_escape.goal_normal_dot_threshold =
+      get_parameter("tangent_escape_filter_goal_normal_dot_threshold").as_double();
 
-    config.damping.accel_d_gain = get_parameter("damping_rmp_accel_d_gain").as_double();
+	    config.damping.accel_d_gain = get_parameter("damping_rmp_accel_d_gain").as_double();
     config.damping.metric_scalar = get_parameter("damping_rmp_metric_scalar").as_double();
     config.damping.inertia = get_parameter("damping_rmp_inertia").as_double();
     return config;
@@ -2296,6 +2455,38 @@ private:
     double intensity_norm{0.0};
   };
 
+  struct TangentEscapeDirectionScore
+  {
+    std::size_t index{0};
+    Eigen::Vector3d direction{Eigen::Vector3d::UnitX()};
+    double goal_score{0.0};
+    double continuity_score{0.0};
+    double up_score{0.0};
+    double duplicate_risk_score{0.0};
+    double adjacent_block_score{0.0};
+    double branch_hold_score{0.0};
+    double total_score{0.0};
+    bool selected{false};
+  };
+
+  struct TangentEscapeCandidate
+  {
+    std::size_t control_point_index{0};
+    Eigen::Vector3d control_point{Eigen::Vector3d::Zero()};
+    Eigen::Vector3d obstacle_center{Eigen::Vector3d::Zero()};
+    Eigen::Vector3d normal{Eigen::Vector3d::UnitZ()};
+    Eigen::Vector3d tangent{Eigen::Vector3d::UnitX()};
+    Eigen::Vector3d raw_accel{Eigen::Vector3d::Zero()};
+    Eigen::Vector3d curvature{Eigen::Vector3d::Zero()};
+    Eigen::Matrix<double, 3, 6> jacobian{Eigen::Matrix<double, 3, 6>::Zero()};
+    double clearance{0.0};
+    double activation{0.0};
+    double score{0.0};
+    bool has_tangent{false};
+    std::size_t selected_direction_index{0};
+    std::vector<TangentEscapeDirectionScore> direction_scores;
+  };
+
   static double sigmoid(double value)
   {
     if (value >= 0.0) {
@@ -2306,6 +2497,12 @@ private:
     return exp_value / (1.0 + exp_value);
   }
 
+  static double smoothstep01(double value)
+  {
+    const double t = std::clamp(value, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+  }
+
   static geometry_msgs::msg::Point to_point(const Eigen::Vector3d & value)
   {
     geometry_msgs::msg::Point point;
@@ -2313,6 +2510,18 @@ private:
     point.y = value.y();
     point.z = value.z();
     return point;
+  }
+
+  static void append_vector3(std::vector<double> & values, const Eigen::Vector3d & vector)
+  {
+    values.push_back(vector.x());
+    values.push_back(vector.y());
+    values.push_back(vector.z());
+  }
+
+  static void append_joint_vector(std::vector<double> & values, const JointVector & vector)
+  {
+    values.insert(values.end(), vector.data(), vector.data() + vector.size());
   }
 
   static std_msgs::msg::ColorRGBA repulsion_metric_color(double metric_norm)
@@ -2471,13 +2680,653 @@ private:
     repulsion_metric_pub_->publish(markers);
   }
 
-  void update_tcp_accel_visualization(
-    const RobotState & state,
+  static Eigen::Vector3d compute_tcp_acceleration(
+    const KinematicsContext & context,
     const JointVector & qdd)
   {
-    const auto context = RB10Model::forward_context(state.q);
-    const Eigen::Vector3d tcp_accel = context.tcp_jacobian * qdd + context.tcp_curvature;
+    return context.tcp_jacobian * qdd + context.tcp_curvature;
+  }
 
+  double tangent_escape_activation(double clearance) const
+  {
+    if (clearance >= tangent_escape_influence_distance_) {
+      return 0.0;
+    }
+    if (clearance <= tangent_escape_safe_distance_) {
+      return 1.0;
+    }
+
+    const double span =
+      std::max(tangent_escape_influence_distance_ - tangent_escape_safe_distance_, 1e-9);
+    const double normalized = (clearance - tangent_escape_safe_distance_) / span;
+    return 1.0 - smoothstep01(normalized);
+  }
+
+  std::optional<Eigen::Vector3d> project_to_tangent_direction(
+    const Eigen::Vector3d & direction,
+    const Eigen::Vector3d & normal) const
+  {
+    if (!direction.allFinite()) {
+      return std::nullopt;
+    }
+
+    Eigen::Vector3d tangent = direction - direction.dot(normal) * normal;
+    const double tangent_norm = tangent.norm();
+    if (tangent_norm <= tangent_escape_min_tangent_norm_) {
+      return std::nullopt;
+    }
+    return tangent / tangent_norm;
+  }
+
+  void append_unique_escape_direction(
+    std::vector<Eigen::Vector3d> & directions,
+    const Eigen::Vector3d & candidate,
+    const Eigen::Vector3d & normal) const
+  {
+    const auto tangent = project_to_tangent_direction(candidate, normal);
+    if (!tangent.has_value()) {
+      return;
+    }
+
+    for (const auto & direction : directions) {
+      if (direction.dot(tangent.value()) > 0.98) {
+        return;
+      }
+    }
+    directions.push_back(tangent.value());
+  }
+
+  std::vector<Eigen::Vector3d> make_tangent_escape_directions(
+    const Eigen::Vector3d & normal,
+    const Eigen::Vector3d & goal_direction,
+    const Eigen::Vector3d & point_velocity) const
+  {
+    std::vector<Eigen::Vector3d> directions;
+    directions.reserve(static_cast<std::size_t>(tangent_escape_candidate_count_ + 10));
+
+    append_unique_escape_direction(directions, goal_direction, normal);
+    append_unique_escape_direction(directions, -goal_direction, normal);
+    if (tangent_escape_previous_tangent_valid_) {
+      append_unique_escape_direction(directions, tangent_escape_previous_tangent_, normal);
+      append_unique_escape_direction(directions, -tangent_escape_previous_tangent_, normal);
+    }
+    append_unique_escape_direction(directions, point_velocity, normal);
+    append_unique_escape_direction(directions, -point_velocity, normal);
+    append_unique_escape_direction(directions, Eigen::Vector3d::UnitZ(), normal);
+    append_unique_escape_direction(directions, -Eigen::Vector3d::UnitZ(), normal);
+    append_unique_escape_direction(directions, Eigen::Vector3d::UnitX(), normal);
+    append_unique_escape_direction(directions, -Eigen::Vector3d::UnitX(), normal);
+    append_unique_escape_direction(directions, Eigen::Vector3d::UnitY(), normal);
+    append_unique_escape_direction(directions, -Eigen::Vector3d::UnitY(), normal);
+
+    const Eigen::Vector3d reference =
+      std::abs(normal.z()) < 0.9 ? Eigen::Vector3d::UnitZ() : Eigen::Vector3d::UnitY();
+    Eigen::Vector3d basis_u = reference.cross(normal);
+    if (basis_u.norm() <= 1e-9) {
+      basis_u = Eigen::Vector3d::UnitX().cross(normal);
+    }
+    basis_u.normalize();
+    const Eigen::Vector3d basis_v = normal.cross(basis_u).normalized();
+    const int candidate_count = std::max(tangent_escape_candidate_count_, 4);
+    for (int index = 0; index < candidate_count; ++index) {
+      const double angle = 2.0 * kPi * static_cast<double>(index) /
+        static_cast<double>(candidate_count);
+      append_unique_escape_direction(
+        directions,
+        std::cos(angle) * basis_u + std::sin(angle) * basis_v,
+        normal);
+    }
+
+    if (directions.empty()) {
+      directions.push_back(basis_u);
+    }
+    return directions;
+  }
+
+  static std::string sensor_direction_suffix(const std::string & frame_name)
+  {
+    const auto separator = frame_name.find_last_of('_');
+    if (separator == std::string::npos || separator + 1 >= frame_name.size()) {
+      return frame_name;
+    }
+    return frame_name.substr(separator + 1);
+  }
+
+  std::optional<std::size_t> paired_sensor_index(std::size_t sensor_index) const
+  {
+    if (sensor_index >= RB10Model::sensor_control_points.size()) {
+      return std::nullopt;
+    }
+
+    const auto & sensor = RB10Model::sensor_control_points[sensor_index];
+    const std::string direction = sensor_direction_suffix(sensor.frame_name);
+    std::optional<std::size_t> best_index;
+    double best_distance = std::numeric_limits<double>::infinity();
+    for (std::size_t index = 0; index < RB10Model::sensor_control_points.size(); ++index) {
+      if (index == sensor_index) {
+        continue;
+      }
+      const auto & candidate = RB10Model::sensor_control_points[index];
+      if (candidate.parent_link != sensor.parent_link) {
+        continue;
+      }
+      if (sensor_direction_suffix(candidate.frame_name) != direction) {
+        continue;
+      }
+      const double distance = (candidate.offset - sensor.offset).norm();
+      if (distance < 0.05 || distance >= best_distance) {
+        continue;
+      }
+      best_index = index;
+      best_distance = distance;
+    }
+    return best_index;
+  }
+
+  double proximity_sensor_detection(
+    std::size_t sensor_index,
+    const KinematicsContext & context,
+    const std::vector<std::optional<ObstacleSphere>> & proximity_sensor_obstacles) const
+  {
+    if (
+      sensor_index >= context.control_points.size() ||
+      sensor_index >= proximity_sensor_obstacles.size() ||
+      !proximity_sensor_obstacles[sensor_index].has_value())
+    {
+      return 0.0;
+    }
+
+    const auto & control_point = context.control_points[sensor_index];
+    const auto & obstacle = proximity_sensor_obstacles[sensor_index].value();
+    if (obstacle.radius <= 0.0 || !obstacle.center.allFinite()) {
+      return 0.0;
+    }
+
+    const double clearance =
+      (control_point.position - obstacle.center).norm() -
+      (control_point.radius + obstacle.radius) -
+      collision_metric_params_.margin;
+    return tangent_escape_activation(clearance);
+  }
+
+  double score_tangent_escape_duplicate_risk(
+    std::size_t active_sensor_index,
+    const Eigen::Vector3d & direction,
+    const Eigen::Vector3d & normal,
+    const KinematicsContext & context,
+    const std::vector<std::optional<ObstacleSphere>> & proximity_sensor_obstacles) const
+  {
+    const auto pair_index = paired_sensor_index(active_sensor_index);
+    if (
+      !pair_index.has_value() ||
+      active_sensor_index >= context.control_points.size() ||
+      pair_index.value() >= context.control_points.size())
+    {
+      return 0.0;
+    }
+
+    const auto pair_axis = project_to_tangent_direction(
+      context.control_points[pair_index.value()].position -
+      context.control_points[active_sensor_index].position,
+      normal);
+    if (!pair_axis.has_value()) {
+      return 0.0;
+    }
+
+    const double paired_detection =
+      proximity_sensor_detection(pair_index.value(), context, proximity_sensor_obstacles);
+    const double toward_pair = std::max(0.0, direction.dot(pair_axis.value()));
+    return paired_detection * toward_pair * toward_pair;
+  }
+
+  double score_tangent_escape_adjacent_block(
+    std::size_t active_sensor_index,
+    const Eigen::Vector3d & direction,
+    const Eigen::Vector3d & normal,
+    const KinematicsContext & context,
+    const std::vector<std::optional<ObstacleSphere>> & proximity_sensor_obstacles) const
+  {
+    if (active_sensor_index >= RB10Model::sensor_control_points.size()) {
+      return 0.0;
+    }
+
+    const auto pair_index = paired_sensor_index(active_sensor_index);
+    const auto & active_sensor = RB10Model::sensor_control_points[active_sensor_index];
+    double penalty = 0.0;
+    for (std::size_t index = 0; index < RB10Model::sensor_control_points.size(); ++index) {
+      if (
+        index == active_sensor_index ||
+        (pair_index.has_value() && index == pair_index.value()) ||
+        index >= context.control_points.size())
+      {
+        continue;
+      }
+      const auto & sensor = RB10Model::sensor_control_points[index];
+      if (sensor.parent_link != active_sensor.parent_link) {
+        continue;
+      }
+
+      const double detection =
+        proximity_sensor_detection(index, context, proximity_sensor_obstacles);
+      if (detection <= 0.0) {
+        continue;
+      }
+
+      const auto sensor_axis = project_to_tangent_direction(
+        context.control_points[index].position -
+        context.control_points[active_sensor_index].position,
+        normal);
+      if (!sensor_axis.has_value()) {
+        continue;
+      }
+      const double alignment = std::max(0.0, direction.dot(sensor_axis.value()));
+      penalty += detection * alignment * alignment;
+    }
+
+    return std::clamp(penalty, 0.0, 3.0);
+  }
+
+  TangentEscapeDirectionScore score_tangent_escape_direction(
+    std::size_t direction_index,
+    std::size_t active_sensor_index,
+    const Eigen::Vector3d & direction,
+    const Eigen::Vector3d & goal_direction,
+    const Eigen::Vector3d & normal,
+    const KinematicsContext & context,
+    const std::vector<std::optional<ObstacleSphere>> & proximity_sensor_obstacles) const
+  {
+    const double goal_score = direction.dot(goal_direction);
+    const double continuity_score = tangent_escape_previous_tangent_valid_ ?
+      direction.dot(tangent_escape_previous_tangent_) :
+      0.0;
+    const double up_score = direction.z();
+    const double duplicate_risk_score = score_tangent_escape_duplicate_risk(
+      active_sensor_index,
+      direction,
+      normal,
+      context,
+      proximity_sensor_obstacles);
+    const double adjacent_block_score = score_tangent_escape_adjacent_block(
+      active_sensor_index,
+      direction,
+      normal,
+      context,
+      proximity_sensor_obstacles);
+    const double branch_hold_score =
+      tangent_escape_previous_tangent_valid_ &&
+      tangent_escape_previous_control_point_index_ == active_sensor_index ?
+      std::pow(std::max(0.0, direction.dot(tangent_escape_previous_tangent_)), 2.0) :
+      0.0;
+
+    TangentEscapeDirectionScore score;
+    score.index = direction_index;
+    score.direction = direction;
+    score.goal_score = goal_score;
+    score.continuity_score = continuity_score;
+    score.up_score = up_score;
+    score.duplicate_risk_score = duplicate_risk_score;
+    score.adjacent_block_score = adjacent_block_score;
+    score.branch_hold_score = branch_hold_score;
+    score.total_score =
+      tangent_escape_goal_weight_ * score.goal_score +
+      tangent_escape_continuity_weight_ * score.continuity_score +
+      tangent_escape_up_weight_ * score.up_score -
+      tangent_escape_duplicate_risk_weight_ * score.duplicate_risk_score -
+      tangent_escape_adjacent_block_weight_ * score.adjacent_block_score +
+      tangent_escape_branch_hold_weight_ * score.branch_hold_score;
+    return score;
+  }
+
+	  std::optional<TangentEscapeCandidate> select_tangent_escape_candidate(
+	    const KinematicsContext & context,
+	    const Eigen::Vector3d & goal,
+	    const std::vector<ObstacleSphere> & obstacles,
+    const std::vector<std::optional<ObstacleSphere>> & proximity_sensor_obstacles,
+	    const JointVector & qd,
+    const JointVector & qdd_raw) const
+  {
+    std::optional<TangentEscapeCandidate> best_candidate;
+    double best_score = -std::numeric_limits<double>::infinity();
+
+    for (std::size_t point_index = 0; point_index < context.control_points.size(); ++point_index) {
+      if (point_index >= context.control_point_jacobians.size()) {
+        continue;
+      }
+
+      const auto & control_point = context.control_points[point_index];
+      const auto & jacobian = context.control_point_jacobians[point_index];
+      const Eigen::Vector3d curvature =
+        point_index < context.control_point_curvatures.size() ?
+        context.control_point_curvatures[point_index] :
+        Eigen::Vector3d::Zero();
+      const Eigen::Vector3d raw_accel = jacobian * qdd_raw + curvature;
+
+      for (const auto & obstacle : obstacles) {
+        if (obstacle.radius <= 0.0 || !obstacle.center.allFinite()) {
+          continue;
+        }
+
+        const Eigen::Vector3d delta = control_point.position - obstacle.center;
+        const double center_distance = delta.norm();
+        if (center_distance <= 1e-9) {
+          continue;
+        }
+
+        const double clearance =
+          center_distance - (control_point.radius + obstacle.radius) -
+          collision_metric_params_.margin;
+        const double activation = tangent_escape_activation(clearance);
+        if (activation < tangent_escape_min_activation_) {
+          continue;
+        }
+
+        const Eigen::Vector3d normal = delta / center_distance;
+        const Eigen::Vector3d goal_delta = goal - control_point.position;
+        const double goal_distance = goal_delta.norm();
+        if (goal_distance <= 1e-9) {
+          continue;
+        }
+
+        const Eigen::Vector3d goal_direction = goal_delta / goal_distance;
+        const double goal_normal_dot = goal_direction.dot(normal);
+        const Eigen::Vector3d point_velocity = jacobian * qd;
+        const double inward_raw_accel = std::max(0.0, -normal.dot(raw_accel));
+        const bool tangent_allowed =
+          goal_normal_dot < tangent_escape_goal_normal_dot_threshold_;
+        if (!tangent_allowed && inward_raw_accel <= 1e-9) {
+          continue;
+        }
+
+        const auto escape_directions = make_tangent_escape_directions(
+          normal,
+          goal_direction,
+          point_velocity);
+        Eigen::Vector3d best_direction = escape_directions.front();
+        std::size_t best_direction_index = 0;
+        double best_direction_score = -std::numeric_limits<double>::infinity();
+        std::vector<TangentEscapeDirectionScore> direction_scores;
+        direction_scores.reserve(escape_directions.size());
+        for (std::size_t direction_index = 0; direction_index < escape_directions.size();
+          ++direction_index)
+        {
+          const auto & direction = escape_directions[direction_index];
+          auto direction_score = score_tangent_escape_direction(
+            direction_index,
+            point_index,
+            direction,
+            goal_direction,
+            normal,
+            context,
+            proximity_sensor_obstacles);
+          if (direction_score.total_score > best_direction_score) {
+            best_direction_score = direction_score.total_score;
+            best_direction = direction;
+            best_direction_index = direction_index;
+          }
+          direction_scores.push_back(direction_score);
+        }
+        if (best_direction_index < direction_scores.size()) {
+          direction_scores[best_direction_index].selected = true;
+        }
+
+        const double inward_goal = std::max(0.0, -goal_normal_dot);
+        const double score =
+          activation *
+          (1.0 + inward_goal + std::min(inward_raw_accel, 1.0) + best_direction_score);
+        if (score <= best_score) {
+          continue;
+        }
+
+        TangentEscapeCandidate candidate;
+        candidate.control_point_index = point_index;
+        candidate.control_point = control_point.position;
+        candidate.obstacle_center = obstacle.center;
+        candidate.normal = normal;
+        candidate.tangent = best_direction;
+        candidate.raw_accel = raw_accel;
+        candidate.curvature = curvature;
+        candidate.jacobian = jacobian;
+        candidate.clearance = clearance;
+        candidate.activation = activation;
+        candidate.score = score;
+        candidate.has_tangent = tangent_allowed;
+        candidate.selected_direction_index = best_direction_index;
+        candidate.direction_scores = std::move(direction_scores);
+        best_candidate = candidate;
+        best_score = score;
+      }
+    }
+
+	    return best_candidate;
+	  }
+
+  TangentEscapeDebugSample make_tangent_escape_debug_sample(
+    const TangentEscapeCandidate & candidate,
+    const KinematicsContext & context,
+    const JointVector & qdd_raw,
+    const JointVector & qdd_filtered) const
+  {
+    TangentEscapeDebugSample sample;
+    sample.control_point_index = candidate.control_point_index;
+    sample.control_point = candidate.control_point;
+    sample.obstacle_center = candidate.obstacle_center;
+    sample.normal = candidate.normal;
+    sample.tangent = candidate.tangent;
+    sample.raw_accel = candidate.raw_accel;
+    sample.filtered_accel = candidate.jacobian * qdd_filtered + candidate.curvature;
+    sample.raw_tcp_accel = compute_tcp_acceleration(context, qdd_raw);
+    sample.filtered_tcp_accel = compute_tcp_acceleration(context, qdd_filtered);
+    sample.qdd_raw = qdd_raw;
+    sample.qdd_filtered = qdd_filtered;
+    sample.clearance = candidate.clearance;
+    sample.activation = candidate.activation;
+    sample.score = candidate.score;
+    sample.has_tangent = candidate.has_tangent;
+    return sample;
+  }
+
+  void publish_tangent_escape_filter_data(
+    const std::optional<TangentEscapeDebugSample> & sample)
+  {
+    if (!tangent_escape_filter_data_pub_) {
+      return;
+    }
+
+    std_msgs::msg::Float64MultiArray msg;
+    if (!sample.has_value()) {
+      msg.data = {0.0};
+    } else {
+      msg.data.reserve(42);
+      msg.data.push_back(1.0);
+      msg.data.push_back(static_cast<double>(sample->control_point_index));
+      msg.data.push_back(sample->clearance);
+      msg.data.push_back(sample->activation);
+      msg.data.push_back(sample->score);
+      msg.data.push_back(sample->has_tangent ? 1.0 : 0.0);
+      append_vector3(msg.data, sample->control_point);
+      append_vector3(msg.data, sample->obstacle_center);
+      append_vector3(msg.data, sample->normal);
+      append_vector3(msg.data, sample->tangent);
+      append_vector3(msg.data, sample->raw_accel);
+      append_vector3(msg.data, sample->filtered_accel);
+      append_vector3(msg.data, sample->raw_tcp_accel);
+      append_vector3(msg.data, sample->filtered_tcp_accel);
+      append_joint_vector(msg.data, sample->qdd_raw);
+      append_joint_vector(msg.data, sample->qdd_filtered);
+    }
+
+    if (rt_tangent_escape_filter_data_pub_) {
+      rt_tangent_escape_filter_data_pub_->tryPublish(msg);
+    } else {
+      tangent_escape_filter_data_pub_->publish(msg);
+    }
+  }
+
+  void publish_tangent_escape_filter_candidate_data(
+    const std::optional<TangentEscapeCandidate> & candidate)
+  {
+    if (!tangent_escape_filter_candidate_data_pub_) {
+      return;
+    }
+
+    std_msgs::msg::Float64MultiArray msg;
+    if (!candidate.has_value()) {
+      msg.data = {0.0};
+    } else {
+      msg.data.reserve(13 + candidate->direction_scores.size() * 18);
+      msg.data.push_back(1.0);
+      msg.data.push_back(static_cast<double>(candidate->direction_scores.size()));
+      msg.data.push_back(static_cast<double>(candidate->selected_direction_index));
+      msg.data.push_back(static_cast<double>(candidate->control_point_index));
+      msg.data.push_back(candidate->clearance);
+      msg.data.push_back(candidate->activation);
+      msg.data.push_back(candidate->score);
+      msg.data.push_back(tangent_escape_goal_weight_);
+      msg.data.push_back(tangent_escape_continuity_weight_);
+      msg.data.push_back(tangent_escape_up_weight_);
+      msg.data.push_back(tangent_escape_duplicate_risk_weight_);
+      msg.data.push_back(tangent_escape_adjacent_block_weight_);
+      msg.data.push_back(tangent_escape_branch_hold_weight_);
+
+      for (const auto & score : candidate->direction_scores) {
+        msg.data.push_back(static_cast<double>(score.index));
+        append_vector3(msg.data, score.direction);
+        msg.data.push_back(score.goal_score);
+        msg.data.push_back(score.continuity_score);
+        msg.data.push_back(score.up_score);
+        msg.data.push_back(score.duplicate_risk_score);
+        msg.data.push_back(score.adjacent_block_score);
+        msg.data.push_back(score.branch_hold_score);
+        msg.data.push_back(tangent_escape_goal_weight_ * score.goal_score);
+        msg.data.push_back(tangent_escape_continuity_weight_ * score.continuity_score);
+        msg.data.push_back(tangent_escape_up_weight_ * score.up_score);
+        msg.data.push_back(-tangent_escape_duplicate_risk_weight_ * score.duplicate_risk_score);
+        msg.data.push_back(-tangent_escape_adjacent_block_weight_ * score.adjacent_block_score);
+        msg.data.push_back(tangent_escape_branch_hold_weight_ * score.branch_hold_score);
+        msg.data.push_back(score.total_score);
+        msg.data.push_back(score.selected ? 1.0 : 0.0);
+      }
+    }
+
+    if (rt_tangent_escape_filter_candidate_data_pub_) {
+      rt_tangent_escape_filter_candidate_data_pub_->tryPublish(msg);
+    } else {
+      tangent_escape_filter_candidate_data_pub_->publish(msg);
+    }
+  }
+
+  void publish_tangent_escape_debug_sample(
+    const std::optional<TangentEscapeDebugSample> & sample)
+  {
+    if (publish_tangent_escape_filter_debug_enabled_) {
+      TangentEscapeDebugState debug_state;
+      if (sample.has_value()) {
+        debug_state.samples.push_back(sample.value());
+      }
+      tangent_escape_debug_box_.set(debug_state);
+    }
+    publish_tangent_escape_filter_data(sample);
+  }
+
+	  JointVector apply_tangent_escape_filter(
+	    const KinematicsContext & context,
+	    const Eigen::Vector3d & goal,
+    const std::vector<ObstacleSphere> & obstacles,
+    const std::vector<std::optional<ObstacleSphere>> & proximity_sensor_obstacles,
+    const JointVector & qd,
+	    const JointVector & qdd_raw)
+	  {
+	    if (!enable_tangent_escape_filter_ || tangent_escape_max_delta_qdd_ <= 0.0) {
+      publish_tangent_escape_filter_candidate_data(std::nullopt);
+      publish_tangent_escape_debug_sample(std::nullopt);
+	      return qdd_raw;
+	    }
+
+	    const auto candidate =
+	      select_tangent_escape_candidate(
+          context,
+          goal,
+          obstacles,
+          proximity_sensor_obstacles,
+          qd,
+          qdd_raw);
+	    if (!candidate.has_value()) {
+      publish_tangent_escape_filter_candidate_data(std::nullopt);
+      publish_tangent_escape_debug_sample(std::nullopt);
+	      return qdd_raw;
+	    }
+    publish_tangent_escape_filter_candidate_data(candidate);
+
+    Eigen::Vector3d desired_task_accel = candidate->raw_accel;
+    if (tangent_escape_normal_gain_ > 0.0) {
+      const double inward_raw_accel =
+        std::min(0.0, candidate->normal.dot(desired_task_accel));
+      desired_task_accel +=
+        candidate->activation * tangent_escape_normal_gain_ * (-inward_raw_accel) *
+        candidate->normal;
+    }
+    if (candidate->has_tangent) {
+      const double desired_tangent_accel =
+        candidate->activation * tangent_escape_tangent_gain_;
+      const double current_tangent_accel = desired_task_accel.dot(candidate->tangent);
+      if (current_tangent_accel < desired_tangent_accel) {
+        desired_task_accel +=
+          (desired_tangent_accel - current_tangent_accel) * candidate->tangent;
+      }
+    }
+
+	    const Eigen::Vector3d delta_task_accel = desired_task_accel - candidate->raw_accel;
+
+	    if (delta_task_accel.norm() <= 1e-9) {
+      const auto sample = make_tangent_escape_debug_sample(
+        candidate.value(),
+        context,
+        qdd_raw,
+        qdd_raw);
+      publish_tangent_escape_debug_sample(sample);
+	      return qdd_raw;
+	    }
+
+	    Eigen::Matrix3d task_matrix = candidate->jacobian * candidate->jacobian.transpose();
+	    task_matrix.diagonal().array() += tangent_escape_damping_ * tangent_escape_damping_;
+	    const Eigen::Vector3d task_solution = task_matrix.ldlt().solve(delta_task_accel);
+	    if (!task_solution.allFinite()) {
+      publish_tangent_escape_debug_sample(std::nullopt);
+	      return qdd_raw;
+	    }
+
+	    JointVector delta_qdd = candidate->jacobian.transpose() * task_solution;
+	    if (!delta_qdd.allFinite()) {
+      publish_tangent_escape_debug_sample(std::nullopt);
+	      return qdd_raw;
+	    }
+
+    const double delta_norm = delta_qdd.norm();
+    if (delta_norm > tangent_escape_max_delta_qdd_) {
+      delta_qdd *= tangent_escape_max_delta_qdd_ / delta_norm;
+    }
+
+    JointVector qdd_filtered = qdd_raw + delta_qdd;
+    for (int index = 0; index < qdd_filtered.size(); ++index) {
+      qdd_filtered[index] = std::clamp(qdd_filtered[index], -max_joint_accel_, max_joint_accel_);
+    }
+
+    const auto sample = make_tangent_escape_debug_sample(
+      candidate.value(),
+      context,
+      qdd_raw,
+      qdd_filtered);
+    publish_tangent_escape_debug_sample(sample);
+
+	    tangent_escape_previous_tangent_ = candidate->tangent;
+    tangent_escape_previous_control_point_index_ = candidate->control_point_index;
+    tangent_escape_previous_tangent_valid_ = candidate->has_tangent;
+
+    return qdd_filtered;
+  }
+
+  void update_tcp_accel_visualization(const Eigen::Vector3d & tcp_accel)
+  {
     TcpAccelerationSample sample;
     sample.acceleration = {tcp_accel.x(), tcp_accel.y(), tcp_accel.z()};
     sample.norm = tcp_accel.norm();
@@ -2486,8 +3335,8 @@ private:
   }
 
   void publish_rmp_accel_debug(
-    const RobotState & state,
-    const JointVector & qdd)
+    const JointVector & qdd,
+    const Eigen::Vector3d * tcp_accel)
   {
     if (rmp_joint_accel_pub_) {
       std_msgs::msg::Float64MultiArray msg;
@@ -2499,12 +3348,9 @@ private:
       }
     }
 
-    if (rmp_tcp_accel_pub_) {
-      const auto context = RB10Model::forward_context(state.q);
-      const Eigen::Vector3d tcp_accel = context.tcp_jacobian * qdd + context.tcp_curvature;
-
+    if (rmp_tcp_accel_pub_ && tcp_accel) {
       std_msgs::msg::Float64MultiArray msg;
-      msg.data = {tcp_accel.x(), tcp_accel.y(), tcp_accel.z()};
+      msg.data = {tcp_accel->x(), tcp_accel->y(), tcp_accel->z()};
       if (rt_rmp_tcp_accel_pub_) {
         rt_rmp_tcp_accel_pub_->tryPublish(msg);
       } else {
@@ -2571,6 +3417,151 @@ private:
     tcp_accel_pub_->publish(marker);
   }
 
+  void publish_tangent_escape_filter_markers()
+  {
+    if (!tangent_escape_debug_pub_) {
+      return;
+    }
+
+    TangentEscapeDebugState debug_state;
+    tangent_escape_debug_box_.get(debug_state);
+
+    visualization_msgs::msg::MarkerArray markers;
+    const auto stamp = now();
+    visualization_msgs::msg::Marker clear_marker;
+    clear_marker.header.frame_id = "base_link";
+    clear_marker.header.stamp = stamp;
+    clear_marker.action = visualization_msgs::msg::Marker::DELETEALL;
+    markers.markers.push_back(clear_marker);
+
+    auto color = [](float r, float g, float b, float a) {
+        std_msgs::msg::ColorRGBA value;
+        value.r = r;
+        value.g = g;
+        value.b = b;
+        value.a = a;
+        return value;
+      };
+
+    int marker_id = 0;
+    auto append_sphere =
+      [&](const Eigen::Vector3d & position, double diameter, const std_msgs::msg::ColorRGBA & rgba)
+      {
+        visualization_msgs::msg::Marker marker;
+        marker.header.frame_id = "base_link";
+        marker.header.stamp = stamp;
+        marker.ns = "tangent_escape_filter_points";
+        marker.id = marker_id++;
+        marker.type = visualization_msgs::msg::Marker::SPHERE;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.pose.position = to_point(position);
+        marker.pose.orientation.w = 1.0;
+        marker.scale.x = diameter;
+        marker.scale.y = diameter;
+        marker.scale.z = diameter;
+        marker.color = rgba;
+        markers.markers.push_back(marker);
+      };
+
+    auto append_arrow =
+      [&](const std::string & name,
+        const Eigen::Vector3d & start,
+        const Eigen::Vector3d & direction,
+        double length,
+        const std_msgs::msg::ColorRGBA & rgba)
+      {
+        const double direction_norm = direction.norm();
+        if (direction_norm <= 1e-9) {
+          return;
+        }
+
+        visualization_msgs::msg::Marker marker;
+        marker.header.frame_id = "base_link";
+        marker.header.stamp = stamp;
+        marker.ns = name;
+        marker.id = marker_id++;
+        marker.type = visualization_msgs::msg::Marker::ARROW;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.points.push_back(to_point(start));
+        marker.points.push_back(to_point(start + direction / direction_norm * length));
+        marker.scale.x = 0.008;
+        marker.scale.y = 0.024;
+        marker.scale.z = 0.032;
+        marker.color = rgba;
+        markers.markers.push_back(marker);
+      };
+
+    for (const auto & sample : debug_state.samples) {
+      const double length_scale =
+        tangent_escape_marker_length_ * std::clamp(sample.activation, 0.25, 1.0);
+      append_sphere(sample.control_point, 0.025, color(1.0F, 1.0F, 1.0F, 0.9F));
+      append_sphere(sample.obstacle_center, 0.025, color(1.0F, 0.55F, 0.0F, 0.8F));
+      append_arrow(
+        "tangent_escape_filter_normal",
+        sample.control_point,
+        sample.normal,
+        length_scale,
+        color(1.0F, 0.05F, 0.05F, 0.9F));
+      if (sample.has_tangent) {
+        append_arrow(
+          "tangent_escape_filter_tangent",
+          sample.control_point,
+          sample.tangent,
+          length_scale,
+          color(0.0F, 0.9F, 0.25F, 0.9F));
+      }
+      append_arrow(
+        "tangent_escape_filter_raw_accel",
+        sample.control_point,
+        sample.raw_accel,
+        tangent_escape_marker_length_,
+        color(0.0F, 0.25F, 1.0F, 0.75F));
+      append_arrow(
+        "tangent_escape_filter_filtered_accel",
+        sample.control_point,
+        sample.filtered_accel,
+        tangent_escape_marker_length_,
+        color(0.0F, 0.9F, 1.0F, 0.85F));
+    }
+
+    tangent_escape_debug_pub_->publish(markers);
+  }
+
+  std::array<double, 6> parse_joint_limit_degrees(
+    const std::string & parameter_name,
+    const std::array<double, 6> & fallback) const
+  {
+    const auto values = get_parameter(parameter_name).as_double_array();
+    if (values.empty()) {
+      return fallback;
+    }
+    if (values.size() != fallback.size()) {
+      throw std::runtime_error(parameter_name + " must contain exactly 6 values");
+    }
+
+    std::array<double, 6> limits{};
+    for (std::size_t index = 0; index < values.size(); ++index) {
+      if (!std::isfinite(values[index])) {
+        throw std::runtime_error(parameter_name + " must contain finite values");
+      }
+      limits[index] = degrees_to_radians(values[index]);
+    }
+    return limits;
+  }
+
+  JointVector clamp_joint_positions(const JointVector & q) const
+  {
+    JointVector clamped = q;
+    for (int index = 0; index < clamped.size(); ++index) {
+      const auto limit_index = static_cast<std::size_t>(index);
+      clamped[index] = std::clamp(
+        clamped[index],
+        joint_lower_limits_[limit_index],
+        joint_upper_limits_[limit_index]);
+    }
+    return clamped;
+  }
+
   JointVector compute_acceleration(
     const RobotState & state,
     const Eigen::Vector3d & goal,
@@ -2618,13 +3609,14 @@ private:
     RobotState command_state = state;
     command_state.qd += qdd * dt;
     command_state.q += command_state.qd * dt;
-    command_state.q = RB10Model::clamp_positions(command_state.q);
+    command_state.q = clamp_joint_positions(command_state.q);
 
     for (int index = 0; index < command_state.q.size(); ++index) {
+      const auto limit_index = static_cast<std::size_t>(index);
       if (
-        (command_state.q[index] <= RB10Model::joint_lower_limits[index] + 0.1 &&
+        (command_state.q[index] <= joint_lower_limits_[limit_index] + 0.1 &&
         command_state.qd[index] < 0.0) ||
-        (command_state.q[index] >= RB10Model::joint_upper_limits[index] - 0.1 &&
+        (command_state.q[index] >= joint_upper_limits_[limit_index] - 0.1 &&
         command_state.qd[index] > 0.0))
       {
         command_state.qd[index] *= 0.5;
@@ -2803,18 +3795,19 @@ private:
     if (command_mode_ == CommandMode::kVelocity) {
       const double safe_dt = std::max(dt, 1e-6);
       for (int index = 0; index < command_state.q.size(); ++index) {
+        const auto limit_index = static_cast<std::size_t>(index);
         double limited_velocity = std::clamp(
           command_state.qd[index],
           -command_guard_max_velocity_rad_s_,
           command_guard_max_velocity_rad_s_);
-        double guarded_lower = RB10Model::joint_lower_limits[index];
-        double guarded_upper = RB10Model::joint_upper_limits[index];
+        double guarded_lower = joint_lower_limits_[limit_index];
+        double guarded_upper = joint_upper_limits_[limit_index];
 
         if (predictive_joint_limit_guard_) {
-          const double raw_lower = RB10Model::joint_lower_limits[index];
-          const double raw_upper = RB10Model::joint_upper_limits[index];
+          const double raw_lower = joint_lower_limits_[limit_index];
+          const double raw_upper = joint_upper_limits_[limit_index];
           const double max_buffer = std::max(0.0, 0.45 * (raw_upper - raw_lower));
-          const double buffer = std::min(joint_limit_buffers_[static_cast<std::size_t>(index)], max_buffer);
+          const double buffer = std::min(joint_limit_buffers_[limit_index], max_buffer);
           guarded_lower = raw_lower + buffer;
           guarded_upper = raw_upper - buffer;
           const double measured_q = measured_state.q[index];
@@ -2829,9 +3822,9 @@ private:
             limited_velocity = std::clamp(limited_velocity, lower_velocity, upper_velocity);
           }
         } else if (
-          (measured_state.q[index] <= RB10Model::joint_lower_limits[index] + 0.1 &&
+          (measured_state.q[index] <= joint_lower_limits_[limit_index] + 0.1 &&
           limited_velocity < 0.0) ||
-          (measured_state.q[index] >= RB10Model::joint_upper_limits[index] - 0.1 &&
+          (measured_state.q[index] >= joint_upper_limits_[limit_index] - 0.1 &&
           limited_velocity > 0.0))
         {
           limited_velocity = 0.0;
@@ -2845,7 +3838,7 @@ private:
           command_state.q[index] = std::clamp(command_state.q[index], guarded_lower, guarded_upper);
         }
       }
-      command_state.q = RB10Model::clamp_positions(command_state.q);
+      command_state.q = clamp_joint_positions(command_state.q);
       return clamped;
     }
 
@@ -2868,6 +3861,12 @@ private:
         clamped = true;
       }
       command_state.qd[index] = limited_velocity;
+    }
+
+    const JointVector unclamped_q = command_state.q;
+    command_state.q = clamp_joint_positions(command_state.q);
+    if ((command_state.q - unclamped_q).cwiseAbs().maxCoeff() > 1e-9) {
+      clamped = true;
     }
 
     return clamped;
@@ -3008,20 +4007,24 @@ private:
       Eigen::Vector3d goal;
       Eigen::Quaterniond goal_orientation;
       std::vector<ObstacleSphere> obstacles;
+      std::vector<std::optional<ObstacleSphere>> proximity_sensor_obstacles;
       GoalTarget goal_target;
       goal_target_box_.get(goal_target);
       goal = goal_target.position;
       goal_orientation = goal_target.orientation;
       obstacles_box_.get(obstacles);
+      proximity_sensor_obstacles_box_.get(proximity_sensor_obstacles);
 
       JointVector qdd = JointVector::Zero();
       last_min_z_safety_triggered_.store(false);
+      bool solve_ok = false;
       try {
         qdd = compute_acceleration(
           control_state,
           goal,
           goal_orientation,
           obstacles);
+        solve_ok = true;
       } catch (const std::exception & error) {
         RCLCPP_ERROR_THROTTLE(
           get_logger(),
@@ -3030,8 +4033,37 @@ private:
           "RMP solve failed, holding command at zero acceleration: %s",
           error.what());
       }
-      update_tcp_accel_visualization(control_state, qdd);
-      publish_rmp_accel_debug(control_state, qdd);
+
+      std::optional<KinematicsContext> control_context_storage;
+      auto control_context = [&]() -> const KinematicsContext & {
+          if ((control_state.q - measured_state.q).cwiseAbs().maxCoeff() <= 1e-12) {
+            return measured_context;
+          }
+          if (!control_context_storage.has_value()) {
+            control_context_storage.emplace(RB10Model::forward_context(control_state.q));
+          }
+          return control_context_storage.value();
+        };
+
+      if (solve_ok && enable_tangent_escape_filter_) {
+        qdd = apply_tangent_escape_filter(
+          control_context(),
+          goal,
+          obstacles,
+          proximity_sensor_obstacles,
+          control_state.qd,
+          qdd);
+      }
+
+      std::optional<Eigen::Vector3d> tcp_accel;
+      if (tcp_accel_pub_ || rmp_tcp_accel_pub_) {
+        tcp_accel = compute_tcp_acceleration(control_context(), qdd);
+      }
+      const Eigen::Vector3d * tcp_accel_ptr = tcp_accel ? &(*tcp_accel) : nullptr;
+      if (tcp_accel_pub_ && tcp_accel_ptr) {
+        update_tcp_accel_visualization(*tcp_accel_ptr);
+      }
+      publish_rmp_accel_debug(qdd, tcp_accel_ptr);
       RobotState predicted_state = integrate_command(control_state, qdd, period.count());
       const auto predicted_context = RB10Model::forward_context(predicted_state.q);
       RobotState command_state = predicted_state;
@@ -3166,18 +4198,28 @@ private:
 
   void publish_visualization()
   {
-    const bool publish_marker_visualization =
-      goal_marker_pub_ && control_point_pub_ && body_obstacle_pub_ &&
-      eef_pose_pub_ && debug_state_pub_;
     const bool publish_goal_tf_visualization =
       publish_goal_tf_enabled_ && static_cast<bool>(goal_tf_broadcaster_);
+    const bool publish_goal_marker_visualization = static_cast<bool>(goal_marker_pub_);
+    const bool publish_context_visualization =
+      static_cast<bool>(control_point_pub_) ||
+      static_cast<bool>(body_obstacle_pub_) ||
+      static_cast<bool>(debug_state_pub_) ||
+      static_cast<bool>(eef_pose_pub_) ||
+      static_cast<bool>(repulsion_metric_pub_) ||
+      static_cast<bool>(tcp_accel_pub_) ||
+      static_cast<bool>(tangent_escape_debug_pub_);
 
-    if (!publish_marker_visualization && !publish_goal_tf_visualization) {
+    if (
+      !publish_goal_marker_visualization &&
+      !publish_context_visualization &&
+      !publish_goal_tf_visualization)
+    {
       return;
     }
 
     if (rmp_flag_gate_enabled_ && (!rmp_active_.load() || !external_goal_received_.load())) {
-      if (publish_marker_visualization) {
+      if (publish_goal_marker_visualization || publish_context_visualization) {
         clear_rmp_visualization();
       }
       return;
@@ -3189,140 +4231,156 @@ private:
       publish_goal_tf(goal_target);
     }
 
-    if (!publish_marker_visualization) {
+    const Eigen::Vector3d goal = goal_target.position;
+    const auto stamp = now();
+
+    if (goal_marker_pub_) {
+      visualization_msgs::msg::Marker goal_marker;
+      goal_marker.header.frame_id = "base_link";
+      goal_marker.header.stamp = stamp;
+      goal_marker.ns = "goal";
+      goal_marker.id = 0;
+      goal_marker.type = visualization_msgs::msg::Marker::SPHERE;
+      goal_marker.action = visualization_msgs::msg::Marker::ADD;
+      goal_marker.pose.position.x = goal.x();
+      goal_marker.pose.position.y = goal.y();
+      goal_marker.pose.position.z = goal.z();
+      goal_marker.pose.orientation.w = 1.0;
+      goal_marker.scale.x = 0.04;
+      goal_marker.scale.y = 0.04;
+      goal_marker.scale.z = 0.04;
+      goal_marker.color.r = 0.0F;
+      goal_marker.color.g = 1.0F;
+      goal_marker.color.b = 0.0F;
+      goal_marker.color.a = 0.8F;
+      goal_marker_pub_->publish(goal_marker);
+    }
+
+    if (!publish_context_visualization) {
+      visualization_cleared_for_inactive_ = false;
       return;
     }
 
     const auto state = backend_->read_state();
     const auto context = RB10Model::forward_context(state.q);
-    publish_debug_state(state, context);
-    const Eigen::Vector3d goal = goal_target.position;
 
-    visualization_msgs::msg::Marker goal_marker;
-    goal_marker.header.frame_id = "base_link";
-    goal_marker.header.stamp = now();
-    goal_marker.ns = "goal";
-    goal_marker.id = 0;
-    goal_marker.type = visualization_msgs::msg::Marker::SPHERE;
-    goal_marker.action = visualization_msgs::msg::Marker::ADD;
-    goal_marker.pose.position.x = goal.x();
-    goal_marker.pose.position.y = goal.y();
-    goal_marker.pose.position.z = goal.z();
-    goal_marker.pose.orientation.w = 1.0;
-    goal_marker.scale.x = 0.04;
-    goal_marker.scale.y = 0.04;
-    goal_marker.scale.z = 0.04;
-    goal_marker.color.r = 0.0F;
-    goal_marker.color.g = 1.0F;
-    goal_marker.color.b = 0.0F;
-    goal_marker.color.a = 0.8F;
-    goal_marker_pub_->publish(goal_marker);
-
-    visualization_msgs::msg::MarkerArray points;
-    for (std::size_t index = 0; index < context.control_points.size(); ++index) {
-      visualization_msgs::msg::Marker marker;
-      marker.header.frame_id = "base_link";
-      marker.header.stamp = now();
-      marker.ns = "control_points";
-      marker.id = static_cast<int>(index);
-      marker.type = visualization_msgs::msg::Marker::SPHERE;
-      marker.action = visualization_msgs::msg::Marker::ADD;
-      marker.pose.position.x = context.control_points[index].position.x();
-      marker.pose.position.y = context.control_points[index].position.y();
-      marker.pose.position.z = context.control_points[index].position.z();
-      marker.pose.orientation.w = 1.0;
-      const double marker_diameter = control_point_marker_diameter_ > 0.0 ?
-        control_point_marker_diameter_ :
-        context.control_points[index].radius * 2.0;
-      marker.scale.x = marker_diameter;
-      marker.scale.y = marker_diameter;
-      marker.scale.z = marker_diameter;
-      marker.color.r = 0.0F;
-      marker.color.g = 0.5F;
-      marker.color.b = 1.0F;
-      marker.color.a = 0.3F;
-      points.markers.push_back(marker);
+    if (debug_state_pub_) {
+      publish_debug_state(state, context);
     }
-    control_point_pub_->publish(points);
 
-    visualization_msgs::msg::MarkerArray body_obstacles;
-    for (std::size_t index = 0; index < body_obstacles_visual_.size(); ++index) {
-      const auto & obstacle = body_obstacles_visual_[index];
-      visualization_msgs::msg::Marker marker;
-      marker.header.frame_id = "base_link";
-      marker.header.stamp = now();
-      marker.ns = "body_obstacles";
-      marker.id = static_cast<int>(index);
-      marker.action = visualization_msgs::msg::Marker::ADD;
-      marker.color.r = 1.0F;
-      marker.color.g = 0.6F;
-      marker.color.b = 0.0F;
-      marker.color.a = 0.22F;
-
-      Eigen::Vector3d center = obstacle.center;
-      Eigen::Matrix3d rotation = Eigen::Matrix3d::Identity();
-      if (!obstacle.link_name.empty()) {
-        const auto link_index = link_index_from_name(obstacle.link_name);
-        rotation = context.link_rotations[link_index];
-        if (obstacle.type == "box") {
-          center =
-            context.link_positions[link_index] +
-            rotation * (0.5 * (obstacle.mins + obstacle.maxs));
-        } else {
-          center =
-            context.link_positions[link_index] +
-            rotation * obstacle.center;
-        }
-      } else if (obstacle.type == "box") {
-        center = 0.5 * (obstacle.mins + obstacle.maxs);
-      }
-
-      marker.pose.position.x = center.x();
-      marker.pose.position.y = center.y();
-      marker.pose.position.z = center.z();
-
-      if (obstacle.type == "ball") {
+    if (control_point_pub_) {
+      visualization_msgs::msg::MarkerArray points;
+      for (std::size_t index = 0; index < context.control_points.size(); ++index) {
+        visualization_msgs::msg::Marker marker;
+        marker.header.frame_id = "base_link";
+        marker.header.stamp = stamp;
+        marker.ns = "control_points";
+        marker.id = static_cast<int>(index);
         marker.type = visualization_msgs::msg::Marker::SPHERE;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.pose.position.x = context.control_points[index].position.x();
+        marker.pose.position.y = context.control_points[index].position.y();
+        marker.pose.position.z = context.control_points[index].position.z();
         marker.pose.orientation.w = 1.0;
-        marker.scale.x = obstacle.radius * 2.0;
-        marker.scale.y = obstacle.radius * 2.0;
-        marker.scale.z = obstacle.radius * 2.0;
-      } else if (obstacle.type == "box") {
-        marker.type = visualization_msgs::msg::Marker::CUBE;
-        Eigen::Quaterniond q(rotation);
-        q.normalize();
-        marker.pose.orientation.x = q.x();
-        marker.pose.orientation.y = q.y();
-        marker.pose.orientation.z = q.z();
-        marker.pose.orientation.w = q.w();
-        const Eigen::Vector3d size = obstacle.maxs - obstacle.mins;
-        marker.scale.x = size.x();
-        marker.scale.y = size.y();
-        marker.scale.z = size.z();
-      } else {
-        continue;
+        const double marker_diameter = control_point_marker_diameter_ > 0.0 ?
+          control_point_marker_diameter_ :
+          context.control_points[index].radius * 2.0;
+        marker.scale.x = marker_diameter;
+        marker.scale.y = marker_diameter;
+        marker.scale.z = marker_diameter;
+        marker.color.r = 0.0F;
+        marker.color.g = 0.5F;
+        marker.color.b = 1.0F;
+        marker.color.a = 0.3F;
+        points.markers.push_back(marker);
       }
-
-      body_obstacles.markers.push_back(marker);
+      control_point_pub_->publish(points);
     }
-    body_obstacle_pub_->publish(body_obstacles);
+
+    if (body_obstacle_pub_) {
+      visualization_msgs::msg::MarkerArray body_obstacles;
+      for (std::size_t index = 0; index < body_obstacles_visual_.size(); ++index) {
+        const auto & obstacle = body_obstacles_visual_[index];
+        visualization_msgs::msg::Marker marker;
+        marker.header.frame_id = "base_link";
+        marker.header.stamp = stamp;
+        marker.ns = "body_obstacles";
+        marker.id = static_cast<int>(index);
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.color.r = 1.0F;
+        marker.color.g = 0.6F;
+        marker.color.b = 0.0F;
+        marker.color.a = 0.22F;
+
+        Eigen::Vector3d center = obstacle.center;
+        Eigen::Matrix3d rotation = Eigen::Matrix3d::Identity();
+        if (!obstacle.link_name.empty()) {
+          const auto link_index = link_index_from_name(obstacle.link_name);
+          rotation = context.link_rotations[link_index];
+          if (obstacle.type == "box") {
+            center =
+              context.link_positions[link_index] +
+              rotation * (0.5 * (obstacle.mins + obstacle.maxs));
+          } else {
+            center =
+              context.link_positions[link_index] +
+              rotation * obstacle.center;
+          }
+        } else if (obstacle.type == "box") {
+          center = 0.5 * (obstacle.mins + obstacle.maxs);
+        }
+
+        marker.pose.position.x = center.x();
+        marker.pose.position.y = center.y();
+        marker.pose.position.z = center.z();
+
+        if (obstacle.type == "ball") {
+          marker.type = visualization_msgs::msg::Marker::SPHERE;
+          marker.pose.orientation.w = 1.0;
+          marker.scale.x = obstacle.radius * 2.0;
+          marker.scale.y = obstacle.radius * 2.0;
+          marker.scale.z = obstacle.radius * 2.0;
+        } else if (obstacle.type == "box") {
+          marker.type = visualization_msgs::msg::Marker::CUBE;
+          Eigen::Quaterniond q(rotation);
+          q.normalize();
+          marker.pose.orientation.x = q.x();
+          marker.pose.orientation.y = q.y();
+          marker.pose.orientation.z = q.z();
+          marker.pose.orientation.w = q.w();
+          const Eigen::Vector3d size = obstacle.maxs - obstacle.mins;
+          marker.scale.x = size.x();
+          marker.scale.y = size.y();
+          marker.scale.z = size.z();
+        } else {
+          continue;
+        }
+
+        body_obstacles.markers.push_back(marker);
+      }
+      body_obstacle_pub_->publish(body_obstacles);
+    }
+
     publish_repulsion_metric_markers(state, context);
     publish_tcp_accel_marker(context);
+    publish_tangent_escape_filter_markers();
 
-    geometry_msgs::msg::PoseStamped eef_pose;
-    const Eigen::Vector3d & eef = context.tcp_position;
-    eef_pose.header.frame_id = "base_link";
-    eef_pose.header.stamp = now();
-    eef_pose.pose.position.x = eef.x();
-    eef_pose.pose.position.y = eef.y();
-    eef_pose.pose.position.z = eef.z();
-    Eigen::Quaterniond tcp_orientation(context.link_rotations[RB10Model::TCP_RMP]);
-    tcp_orientation.normalize();
-    eef_pose.pose.orientation.x = tcp_orientation.x();
-    eef_pose.pose.orientation.y = tcp_orientation.y();
-    eef_pose.pose.orientation.z = tcp_orientation.z();
-    eef_pose.pose.orientation.w = tcp_orientation.w();
-    eef_pose_pub_->publish(eef_pose);
+    if (eef_pose_pub_) {
+      geometry_msgs::msg::PoseStamped eef_pose;
+      const Eigen::Vector3d & eef = context.tcp_position;
+      eef_pose.header.frame_id = "base_link";
+      eef_pose.header.stamp = stamp;
+      eef_pose.pose.position.x = eef.x();
+      eef_pose.pose.position.y = eef.y();
+      eef_pose.pose.position.z = eef.z();
+      Eigen::Quaterniond tcp_orientation(context.link_rotations[RB10Model::TCP_RMP]);
+      tcp_orientation.normalize();
+      eef_pose.pose.orientation.x = tcp_orientation.x();
+      eef_pose.pose.orientation.y = tcp_orientation.y();
+      eef_pose.pose.orientation.z = tcp_orientation.z();
+      eef_pose.pose.orientation.w = tcp_orientation.w();
+      eef_pose_pub_->publish(eef_pose);
+    }
     visualization_cleared_for_inactive_ = false;
   }
 
@@ -3336,7 +4394,9 @@ private:
     clear_goal.header.frame_id = "base_link";
     clear_goal.header.stamp = now();
     clear_goal.action = visualization_msgs::msg::Marker::DELETEALL;
-    goal_marker_pub_->publish(clear_goal);
+    if (goal_marker_pub_) {
+      goal_marker_pub_->publish(clear_goal);
+    }
 
     visualization_msgs::msg::Marker clear_marker;
     clear_marker.header.frame_id = "base_link";
@@ -3345,13 +4405,20 @@ private:
 
     visualization_msgs::msg::MarkerArray clear_array;
     clear_array.markers.push_back(clear_marker);
-    control_point_pub_->publish(clear_array);
-    body_obstacle_pub_->publish(clear_array);
+    if (control_point_pub_) {
+      control_point_pub_->publish(clear_array);
+    }
+    if (body_obstacle_pub_) {
+      body_obstacle_pub_->publish(clear_array);
+    }
     if (repulsion_metric_pub_) {
       repulsion_metric_pub_->publish(clear_array);
     }
     if (tcp_accel_pub_) {
       tcp_accel_pub_->publish(clear_marker);
+    }
+    if (tangent_escape_debug_pub_) {
+      tangent_escape_debug_pub_->publish(clear_array);
     }
     visualization_cleared_for_inactive_ = true;
   }
@@ -3377,6 +4444,7 @@ private:
   realtime_tools::RealtimeBox<std::vector<std::optional<ObstacleSphere>>>
   proximity_sensor_obstacles_box_;
   realtime_tools::RealtimeBox<TcpAccelerationSample> tcp_accel_visualization_box_;
+  realtime_tools::RealtimeBox<TangentEscapeDebugState> tangent_escape_debug_box_;
   std::vector<BodyObstacle> body_obstacles_visual_;
   std::atomic<bool> last_min_z_safety_triggered_{false};
   bool initialize_goal_from_first_state_{true};
@@ -3386,6 +4454,11 @@ private:
   std::unordered_map<std::string, ExternalRmpBuffer> external_rmp_buffers_;
   bool publish_joint_states_enabled_{true};
   bool publish_visualization_enabled_{true};
+  bool publish_goal_marker_enabled_{true};
+  bool publish_control_point_markers_enabled_{true};
+  bool publish_body_obstacle_markers_enabled_{true};
+  bool publish_end_effector_pose_enabled_{true};
+  bool publish_debug_state_enabled_{true};
   bool publish_repulsion_metric_markers_enabled_{true};
   bool publish_tcp_accel_marker_enabled_{true};
   bool publish_rmp_ee_pose_enabled_{true};
@@ -3414,12 +4487,39 @@ private:
   double command_guard_max_step_rad_{0.00436332313};
   double command_guard_max_velocity_rad_s_{0.436332313};
   bool predictive_joint_limit_guard_{true};
+  std::array<double, 6> joint_lower_limits_ = RB10Model::joint_lower_limits;
+  std::array<double, 6> joint_upper_limits_ = RB10Model::joint_upper_limits;
   std::array<double, 6> joint_limit_buffers_{0.01, 0.01, 0.01, 0.01, 0.01, 0.01};
   double repulsion_metric_marker_min_norm_{0.01};
   double repulsion_metric_marker_dot_diameter_{0.04};
   double tcp_accel_marker_max_length_{0.15};
   double tcp_accel_marker_norm_for_max_length_{2.0};
   double tcp_accel_marker_min_norm_{0.001};
+  bool enable_tangent_escape_filter_{false};
+  bool publish_tangent_escape_filter_debug_enabled_{false};
+  bool publish_tangent_escape_filter_data_enabled_{false};
+  bool publish_tangent_escape_filter_candidate_data_enabled_{false};
+  double tangent_escape_safe_distance_{0.08};
+  double tangent_escape_influence_distance_{0.25};
+  double tangent_escape_tangent_gain_{2.0};
+  double tangent_escape_normal_gain_{0.0};
+  double tangent_escape_damping_{0.02};
+  double tangent_escape_max_delta_qdd_{8.0};
+  int tangent_escape_candidate_count_{16};
+  double tangent_escape_candidate_lookahead_{0.08};
+  double tangent_escape_goal_weight_{1.0};
+  double tangent_escape_continuity_weight_{0.5};
+  double tangent_escape_up_weight_{0.0};
+  double tangent_escape_duplicate_risk_weight_{2.0};
+  double tangent_escape_adjacent_block_weight_{1.0};
+  double tangent_escape_branch_hold_weight_{0.5};
+  double tangent_escape_min_activation_{0.05};
+  double tangent_escape_min_tangent_norm_{1e-4};
+  double tangent_escape_goal_normal_dot_threshold_{1.0};
+  double tangent_escape_marker_length_{0.12};
+  Eigen::Vector3d tangent_escape_previous_tangent_{Eigen::Vector3d::UnitX()};
+  std::size_t tangent_escape_previous_control_point_index_{0};
+  bool tangent_escape_previous_tangent_valid_{false};
   int rmp_active_flag_value_{1};
   std::atomic<bool> rmp_active_{true};
 
@@ -3430,10 +4530,14 @@ private:
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr target_metric_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr rmp_joint_accel_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr rmp_tcp_accel_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr tangent_escape_filter_data_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
+    tangent_escape_filter_candidate_data_pub_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr goal_marker_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr control_point_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr body_obstacle_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr repulsion_metric_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr tangent_escape_debug_pub_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr tcp_accel_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr eef_pose_pub_;
   rclcpp::Publisher<geometry_msgs::msg::Pose>::SharedPtr rmp_eef_pose_pub_;
@@ -3446,6 +4550,8 @@ private:
   std::shared_ptr<Float64ArrayRtPublisher> rt_target_metric_pub_;
   std::shared_ptr<Float64ArrayRtPublisher> rt_rmp_joint_accel_pub_;
   std::shared_ptr<Float64ArrayRtPublisher> rt_rmp_tcp_accel_pub_;
+  std::shared_ptr<Float64ArrayRtPublisher> rt_tangent_escape_filter_data_pub_;
+  std::shared_ptr<Float64ArrayRtPublisher> rt_tangent_escape_filter_candidate_data_pub_;
   std::shared_ptr<PoseRtPublisher> rt_rmp_eef_pose_pub_;
   rclcpp::Subscription<geometry_msgs::msg::Point>::SharedPtr goal_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_sub_;

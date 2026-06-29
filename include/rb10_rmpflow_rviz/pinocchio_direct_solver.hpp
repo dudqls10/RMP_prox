@@ -32,7 +32,7 @@ public:
   std::vector<RmpSolveResult> solve_batch(
     const std::vector<RmpBatchInput> & batch_inputs) const override;
 
-private:
+public:
   struct NodeGeometry
   {
     Eigen::VectorXd x;
@@ -41,6 +41,7 @@ private:
     Eigen::VectorXd curvature;
   };
 
+private:
   static double sigmoid(double value);
 
   static void accumulate_scalar_leaf(
@@ -140,8 +141,9 @@ private:
     Matrix6 & metric,
     JointVector & force) const;
 
-  void accumulate_custom_avoidance_collision(
-    const NodeGeometry & control_point_geometry,
+  void accumulate_tangent_escape(
+    const NodeGeometry & geometry,
+    const JointVector & qd,
     const Eigen::Vector3d & goal,
     const std::vector<ObstacleSphere> & obstacles,
     Matrix6 & metric,
@@ -165,6 +167,7 @@ private:
     const JointVector & qd,
     const std::unordered_map<std::string, NodeGeometry> & cache,
     const std::unordered_map<std::string, Eigen::Vector3d> & vector_targets,
+    const std::vector<ObstacleSphere> & obstacles,
     const std::unordered_map<std::string, ExternalRmpFeature> & external_rmps,
     Matrix6 & metric,
     JointVector & force) const;
@@ -172,6 +175,9 @@ private:
   EigenRmpConfig config_;
   std::shared_ptr<const PinocchioModel> model_;
   std::shared_ptr<const void> compiled_state_;
+  mutable Eigen::Vector3d tangent_escape_previous_tangent_{Eigen::Vector3d::UnitX()};
+  mutable std::size_t tangent_escape_previous_control_point_index_{0};
+  mutable bool tangent_escape_previous_tangent_valid_{false};
 };
 
 }  // namespace rb10_rmpflow_rviz
