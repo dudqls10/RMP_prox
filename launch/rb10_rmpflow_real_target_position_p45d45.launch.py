@@ -39,22 +39,16 @@ def generate_launch_description():
     use_interactive_goal = LaunchConfiguration("use_interactive_goal")
     use_obstacles = LaunchConfiguration("use_obstacles")
     use_proximity_bridge = LaunchConfiguration("use_proximity_bridge")
-    proximity_surface_visualization = LaunchConfiguration("proximity_surface_visualization")
-    surface_patch_enabled = LaunchConfiguration("surface_patch_enabled")
-    surface_patch_collision_memory_enabled = LaunchConfiguration(
-        "surface_patch_collision_memory_enabled"
-    )
+    use_tof_ray_visualizer = LaunchConfiguration("use_tof_ray_visualizer")
     record_data = LaunchConfiguration("record_data")
     auto_start_recording = LaunchConfiguration("auto_start_recording")
     recording_rate = LaunchConfiguration("recording_rate")
     recording_output_directory = LaunchConfiguration("recording_output_directory")
     recording_output_prefix = LaunchConfiguration("recording_output_prefix")
-    recorder_range_topics = [f"/raw_distance{index}" for index in range(1, 21)]
     servo_t1 = LaunchConfiguration("servo_t1")
     servo_t2 = LaunchConfiguration("servo_t2")
     servo_gain = LaunchConfiguration("servo_gain")
     servo_alpha = LaunchConfiguration("servo_alpha")
-    command_mode = LaunchConfiguration("command_mode")
     startup_move_to_default_pose = LaunchConfiguration("startup_move_to_default_pose")
     startup_movej_speed = LaunchConfiguration("startup_movej_speed")
     startup_movej_accel = LaunchConfiguration("startup_movej_accel")
@@ -69,14 +63,9 @@ def generate_launch_description():
     bridge_max_command_step_deg = LaunchConfiguration("bridge_max_command_step_deg")
     bridge_max_command_velocity_deg_s = LaunchConfiguration("bridge_max_command_velocity_deg_s")
     bridge_large_command_jump_warn_deg = LaunchConfiguration("bridge_large_command_jump_warn_deg")
+    command_guard_max_step_rad = LaunchConfiguration("command_guard_max_step_rad")
+    command_guard_max_velocity_rad_s = LaunchConfiguration("command_guard_max_velocity_rad_s")
     bridge_publish_rate = LaunchConfiguration("bridge_publish_rate")
-    estimate_velocity_in_controller = LaunchConfiguration("estimate_velocity_in_controller")
-    use_synced_input_velocity_filter = LaunchConfiguration("use_synced_input_velocity_filter")
-    synced_input_velocity_filter_alpha = LaunchConfiguration("synced_input_velocity_filter_alpha")
-    synced_input_velocity_filter_beta = LaunchConfiguration("synced_input_velocity_filter_beta")
-    synced_input_velocity_ratio_tolerance = LaunchConfiguration("synced_input_velocity_ratio_tolerance")
-    use_velocity_feedback_in_solver = LaunchConfiguration("use_velocity_feedback_in_solver")
-    measured_velocity_feedback_blend = LaunchConfiguration("measured_velocity_feedback_blend")
     record_joint_velocity = LaunchConfiguration("record_joint_velocity")
     joint_velocity_log_directory = LaunchConfiguration("joint_velocity_log_directory")
     joint_velocity_log_prefix = LaunchConfiguration("joint_velocity_log_prefix")
@@ -88,9 +77,6 @@ def generate_launch_description():
         "hardware_data_request_rate": bridge_publish_rate,
         "joint_state_topic": "/joint_states",
         "position_command_topic": "/position_controllers/commands",
-        "publish_position_command": True,
-        "position_command_state_topic": "/rmp_position_command",
-        "command_mode": command_mode,
         "publish_target_q": True,
         "target_q_topic": "/target_q",
         "publish_joint_states": ParameterValue(
@@ -122,14 +108,8 @@ def generate_launch_description():
         "enable_socket_realtime": enable_socket_realtime,
         "socket_realtime_priority": socket_realtime_priority,
         "publish_debug_joint_state_sources": publish_debug_joint_state_sources,
-        "estimate_velocity_in_controller": estimate_velocity_in_controller,
-        "use_synced_input_velocity_filter": use_synced_input_velocity_filter,
-        "synced_input_velocity_filter_type": "alpha-beta",
-        "synced_input_velocity_filter_alpha": synced_input_velocity_filter_alpha,
-        "synced_input_velocity_filter_beta": synced_input_velocity_filter_beta,
-        "synced_input_velocity_ratio_tolerance": synced_input_velocity_ratio_tolerance,
-        "use_velocity_feedback_in_solver": use_velocity_feedback_in_solver,
-        "measured_velocity_feedback_blend": measured_velocity_feedback_blend,
+        "command_guard_max_step_rad": command_guard_max_step_rad,
+        "command_guard_max_velocity_rad_s": command_guard_max_velocity_rad_s,
     }
 
     api_bridge = Node(
@@ -138,27 +118,23 @@ def generate_launch_description():
         name="rb10_api_bridge",
         output="screen",
         condition=IfCondition(PythonExpression(['"', use_direct_hardware_backend, '" != "true"'])),
-        parameters=[
-            params_file,
-            {
-                "robot_ip": robot_ip,
-                "simulation_mode": cb_simulation,
-                "command_mode": command_mode,
-                "command_topic": "/position_controllers/commands",
-                "joint_state_topic": "/joint_states",
-                "real_joint_state_source": real_joint_state_source,
-                "publish_rate": bridge_publish_rate,
-                "servo_t1": servo_t1,
-                "servo_t2": servo_t2,
-                "servo_gain": servo_gain,
-                "servo_alpha": servo_alpha,
-                "max_command_step_deg": bridge_max_command_step_deg,
-                "max_command_velocity_deg_s": bridge_max_command_velocity_deg_s,
-                "large_command_jump_warn_deg": bridge_large_command_jump_warn_deg,
-                "stop_on_shutdown": stop_on_shutdown,
-                "shutdown_action": shutdown_action,
-            },
-        ],
+        parameters=[{
+            "robot_ip": robot_ip,
+            "simulation_mode": cb_simulation,
+            "command_topic": "/position_controllers/commands",
+            "joint_state_topic": "/joint_states",
+            "real_joint_state_source": real_joint_state_source,
+            "publish_rate": bridge_publish_rate,
+            "servo_t1": servo_t1,
+            "servo_t2": servo_t2,
+            "servo_gain": servo_gain,
+            "servo_alpha": servo_alpha,
+            "max_command_step_deg": bridge_max_command_step_deg,
+            "max_command_velocity_deg_s": bridge_max_command_velocity_deg_s,
+            "large_command_jump_warn_deg": bridge_large_command_jump_warn_deg,
+            "stop_on_shutdown": stop_on_shutdown,
+            "shutdown_action": shutdown_action,
+        }],
     )
 
     robot_state_publisher = Node(
@@ -170,9 +146,6 @@ def generate_launch_description():
             "robot_description": robot_description,
             "publish_frequency": 50.0,
         }],
-        remappings=[
-            ("robot_description", "/rb10/robot_description"),
-        ],
     )
 
     rmpflow_controller = Node(
@@ -217,41 +190,26 @@ def generate_launch_description():
         executable="proximity_obstacle_bridge",
         name="proximity_obstacle_bridge",
         output="screen",
-        condition=IfCondition(PythonExpression([
-            '"', use_proximity_bridge, '" == "true" or "',
-            proximity_surface_visualization, '" == "true"',
-        ])),
-        parameters=[
-            params_file,
-            {
-                "publish_collision_obstacles": ParameterValue(
-                    PythonExpression([
-                        'True if "', use_proximity_bridge, '" == "true" else False'
-                    ]),
-                    value_type=bool,
-                ),
-                "surface_patch_fixed_visualization": ParameterValue(
-                    PythonExpression([
-                        'True if "', proximity_surface_visualization,
-                        '" == "true" else False'
-                    ]),
-                    value_type=bool,
-                ),
-                "surface_patch_enabled": ParameterValue(
-                    PythonExpression([
-                        'True if "', surface_patch_enabled, '" == "true" else False'
-                    ]),
-                    value_type=bool,
-                ),
-                "surface_patch_collision_memory_enabled": ParameterValue(
-                    PythonExpression([
-                        'True if "', surface_patch_collision_memory_enabled,
-                        '" == "true" else False'
-                    ]),
-                    value_type=bool,
-                ),
-            },
-        ],
+        condition=IfCondition(use_proximity_bridge),
+        parameters=[params_file],
+    )
+
+    tof_ray_visualizer = Node(
+        package="rb10_rmpflow_rviz",
+        executable="tof_ray_visualizer",
+        name="tof_ray_visualizer",
+        output="screen",
+        condition=IfCondition(use_tof_ray_visualizer),
+        parameters=[{
+            "publish_rate": 20.0,
+            "max_range": 0.2,
+            "min_range": 0.02,
+            "sensor_face_width": 0.25,
+            "sensor_face_height": 0.25,
+            "sensor_grid_resolution": 7,
+            "edge_range_ratio": 0.6,
+            "edge_falloff_power": 2.0,
+        }],
     )
 
     data_recorder = Node(
@@ -267,7 +225,14 @@ def generate_launch_description():
             "output_directory": recording_output_directory,
             "output_prefix": recording_output_prefix,
             "joint_state_topic": "/joint_states",
-            "range_topics": recorder_range_topics,
+            "command_topic": "/position_controllers/commands",
+            "goal_position_topic": "/goal_position",
+            "goal_pose_topic": "/goal_pose",
+            "ee_pose_topic": "/rmp_ee_pose",
+            "obstacle_topic": "/obstacles",
+            "reference_joint_state_topic": "/rb10/reference_joint_states",
+            "measured_joint_state_topic": "/rb10/measured_joint_states",
+            "tracking_error_topic": "/rb10/joint_tracking_error_deg",
         }],
     )
 
@@ -356,62 +321,14 @@ def generate_launch_description():
             description="Use external proximity topics to build obstacle markers.",
         ),
         DeclareLaunchArgument(
-            "proximity_surface_visualization",
+            "use_tof_ray_visualizer",
             default_value="true",
-            description=(
-                "Publish RViz-only fixed surface patches from proximity sensor range hits. "
-                "When use_proximity_bridge is false this does not publish collision obstacles."
-            ),
-        ),
-        DeclareLaunchArgument(
-            "surface_patch_enabled",
-            default_value="true",
-            description="Publish live proximity surface patch markers into /obstacles.",
-        ),
-        DeclareLaunchArgument(
-            "surface_patch_collision_memory_enabled",
-            default_value="true",
-            description="Feed remembered proximity surface patches into /obstacles.",
+            description="Start the ToF ray marker visualizer.",
         ),
         DeclareLaunchArgument(
             "bridge_publish_rate",
             default_value="500.0",
             description="RB10 state receive/publish rate in Hz before filtering.",
-        ),
-        DeclareLaunchArgument(
-            "estimate_velocity_in_controller",
-            default_value="false",
-            description="Estimate qd in the 50 Hz controller loop from measured q.",
-        ),
-        DeclareLaunchArgument(
-            "use_synced_input_velocity_filter",
-            default_value="true",
-            description="Use the direct backend high-rate input velocity filter for solver qd.",
-        ),
-        DeclareLaunchArgument(
-            "synced_input_velocity_filter_alpha",
-            default_value="0.35",
-            description="Alpha for the high-rate velocity filter.",
-        ),
-        DeclareLaunchArgument(
-            "synced_input_velocity_filter_beta",
-            default_value="0.02",
-            description="Beta for the fixed alpha-beta synchronized high-rate velocity filter.",
-        ),
-        DeclareLaunchArgument(
-            "synced_input_velocity_ratio_tolerance",
-            default_value="0.05",
-            description="Tolerance when matching input/control rates to an integer sync ratio.",
-        ),
-        DeclareLaunchArgument(
-            "use_velocity_feedback_in_solver",
-            default_value="true",
-            description="Pass qd feedback into the RMP solver.",
-        ),
-        DeclareLaunchArgument(
-            "measured_velocity_feedback_blend",
-            default_value="1.0",
-            description="Blend factor for measured/synced qd before the RMP solve.",
         ),
         DeclareLaunchArgument(
             "record_data",
@@ -435,8 +352,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "auto_start_recording",
-            default_value="false",
-            description="Keep recorder idle until the experiment runner starts it.",
+            default_value="true",
+            description="Start recording immediately when the recorder node launches.",
         ),
         DeclareLaunchArgument(
             "recording_rate",
@@ -470,28 +387,33 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "servo_alpha",
-            default_value="0.2",
+            default_value="0.4",
             description="ServoJ low-pass filter gain for the internal RB10 bridge.",
         ),
         DeclareLaunchArgument(
-            "command_mode",
-            default_value="velocity",
-            description="RB10 command output mode: position sends move_servo_j, velocity sends move_speed_j.",
-        ),
-        DeclareLaunchArgument(
             "bridge_max_command_step_deg",
-            default_value="1.0",
+            default_value="0.25",
             description="Hard per-cycle joint-step limit for the Python RB10 bridge to avoid hardware safety trips.",
         ),
         DeclareLaunchArgument(
             "bridge_max_command_velocity_deg_s",
-            default_value="100.0",
+            default_value="25.0",
             description="Hard joint-velocity limit used by the Python RB10 bridge command guard.",
         ),
         DeclareLaunchArgument(
             "bridge_large_command_jump_warn_deg",
             default_value="2.0",
             description="Warn when the requested bridge command jumps more than this far from the current joint reference.",
+        ),
+        DeclareLaunchArgument(
+            "command_guard_max_step_rad",
+            default_value="1.745329252",
+            description="Maximum per-cycle joint position correction applied by the direct-controller command guard, in radians.",
+        ),
+        DeclareLaunchArgument(
+            "command_guard_max_velocity_rad_s",
+            default_value="1.745329252",
+            description="Maximum joint velocity allowed by the direct-controller command guard, in radians per second.",
         ),
         DeclareLaunchArgument(
             "startup_move_to_default_pose",
@@ -557,5 +479,6 @@ def generate_launch_description():
         interactive_goal,
         obstacle_manager,
         proximity_obstacle_bridge,
+        tof_ray_visualizer,
         rviz,
     ])

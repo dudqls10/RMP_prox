@@ -56,16 +56,7 @@ def generate_launch_description():
     recording_rate = LaunchConfiguration("recording_rate")
     recording_output_directory = LaunchConfiguration("recording_output_directory")
     recording_output_prefix = LaunchConfiguration("recording_output_prefix")
-    recorder_range_topics = [
-        "/proximity_distance1",
-        "/proximity_distance2",
-        "/proximity_distance3",
-        "/proximity_distance4",
-        "/proximity_distance9",
-        "/proximity_distance10",
-        "/proximity_distance11",
-        "/proximity_distance12",
-    ]
+    recorder_range_topics = [f"/raw_distance{index}" for index in range(1, 21)]
     servo_t1 = LaunchConfiguration("servo_t1")
     servo_t2 = LaunchConfiguration("servo_t2")
     servo_gain = LaunchConfiguration("servo_gain")
@@ -360,17 +351,7 @@ def generate_launch_description():
             "output_directory": recording_output_directory,
             "output_prefix": recording_output_prefix,
             "joint_state_topic": normalized_joint_state_topic,
-            "command_topic": "/position_controllers/commands",
-            "goal_pose_topic": "/goal_pose",
-            "obstacle_topic": "/obstacles",
             "range_topics": recorder_range_topics,
-            "max_obstacles": len(recorder_range_topics),
-            "reference_joint_state_topic": "/rb10/reference_joint_states",
-            "measured_joint_state_topic": "/rb10/measured_joint_states",
-            "tracking_error_topic": "/rb10/joint_tracking_error_deg",
-            "rmp_tcp_accel_topic": "/rmp_tcp_accel",
-            "tangent_escape_filter_data_topic": "/tangent_escape_filter_data",
-            "tangent_escape_filter_candidate_data_topic": "/tangent_escape_filter_candidates",
         }],
     )
 

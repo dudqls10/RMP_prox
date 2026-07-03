@@ -272,6 +272,9 @@ install(
 
 install(
   PROGRAMS
+    scripts/run_camera_rviz.sh
+    scripts/camera_obstacle_feature_node.py
+    scripts/mediapipe_pose_obstacle_node.py
     scripts/rb10_api_bridge.py
     scripts/rb10_api_standalone_test.py
     scripts/rmp_data_recorder.py

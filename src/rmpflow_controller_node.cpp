@@ -1111,6 +1111,11 @@ public:
     declare_parameter("tangent_escape_rmp_metric_scalar", 0.0);
     declare_parameter("tangent_escape_rmp_normal_metric_scalar", 0.0);
     declare_parameter("tangent_escape_rmp_damping_gain", 0.0);
+    declare_parameter("tangent_escape_rmp_escape_speed", 0.05);
+    declare_parameter("tangent_escape_rmp_velocity_gain", 5.0);
+    declare_parameter("tangent_escape_rmp_max_accel", 0.8);
+    declare_parameter("tangent_escape_rmp_goal_block_beta_on", 0.5);
+    declare_parameter("tangent_escape_rmp_goal_block_beta_full", 0.94);
 	    declare_parameter("tangent_escape_filter_safe_distance", 0.08);
     declare_parameter("tangent_escape_filter_influence_distance", 0.25);
     declare_parameter("tangent_escape_filter_tangent_gain", 2.0);
@@ -1878,6 +1883,16 @@ private:
       get_parameter("tangent_escape_rmp_normal_metric_scalar").as_double();
     config.tangent_escape.damping_gain =
       get_parameter("tangent_escape_rmp_damping_gain").as_double();
+    config.tangent_escape.escape_speed =
+      get_parameter("tangent_escape_rmp_escape_speed").as_double();
+    config.tangent_escape.velocity_gain =
+      get_parameter("tangent_escape_rmp_velocity_gain").as_double();
+    config.tangent_escape.max_accel =
+      get_parameter("tangent_escape_rmp_max_accel").as_double();
+    config.tangent_escape.goal_block_beta_on =
+      get_parameter("tangent_escape_rmp_goal_block_beta_on").as_double();
+    config.tangent_escape.goal_block_beta_full =
+      get_parameter("tangent_escape_rmp_goal_block_beta_full").as_double();
     config.tangent_escape.safe_distance =
       get_parameter("tangent_escape_filter_safe_distance").as_double();
     config.tangent_escape.influence_distance =

@@ -179,6 +179,18 @@ double tangent_escape_activation(
   return 1.0 - smoothstep01(normalized);
 }
 
+double tangent_escape_blocking_activation(
+  double beta,
+  const TangentEscapeRmpParams & params)
+{
+  const double beta_on = std::clamp(
+    std::min(params.goal_block_beta_on, params.goal_block_beta_full), -1.0, 1.0);
+  const double beta_full = std::clamp(
+    std::max(params.goal_block_beta_on, params.goal_block_beta_full), -1.0, 1.0);
+  const double span = std::max(beta_full - beta_on, 1e-9);
+  return smoothstep01((beta - beta_on) / span);
+}
+
 std::optional<Eigen::Vector3d> project_to_tangent_direction(
   const Eigen::Vector3d & direction,
   const Eigen::Vector3d & normal,
@@ -1668,10 +1680,9 @@ void PinocchioDirectRmpSolver::accumulate_tangent_escape(
 {
   const auto & params = config_.tangent_escape;
   const double tangent_metric_scalar = std::max(params.metric_scalar, 0.0);
-  const double normal_metric_scalar = std::max(params.normal_metric_scalar, 0.0);
   if (
     !params.enabled ||
-    (tangent_metric_scalar <= 0.0 && normal_metric_scalar <= 0.0) ||
+    tangent_metric_scalar <= 0.0 ||
     obstacles.empty() ||
     geometry.x.size() % 3 != 0 ||
     geometry.jacobian.cols() != 6)
@@ -1718,8 +1729,8 @@ void PinocchioDirectRmpSolver::accumulate_tangent_escape(
 
       const double clearance =
         center_distance - (point_radius + obstacle.radius) - config_.collision.margin;
-      const double activation = tangent_escape_activation(clearance, params);
-      if (activation < params.min_activation) {
+      const double proximity_activation = tangent_escape_activation(clearance, params);
+      if (proximity_activation <= 0.0) {
         continue;
       }
 
@@ -1731,11 +1742,14 @@ void PinocchioDirectRmpSolver::accumulate_tangent_escape(
       }
 
       const Eigen::Vector3d goal_direction = goal_delta / goal_distance;
-      const double goal_normal_dot = goal_direction.dot(normal);
-      const bool tangent_allowed = goal_normal_dot < params.goal_normal_dot_threshold;
-      if (!tangent_allowed && normal_metric_scalar <= 0.0) {
+      const double beta = -goal_direction.dot(normal);
+      const double blocking_activation = tangent_escape_blocking_activation(beta, params);
+      const double activation = proximity_activation * blocking_activation;
+      if (activation < params.min_activation) {
         continue;
       }
+      const auto goal_tangent_direction =
+        project_to_tangent_direction(goal_direction, normal, params.min_tangent_norm);
 
       const auto escape_directions = make_tangent_escape_directions(
         normal,
@@ -1747,7 +1761,9 @@ void PinocchioDirectRmpSolver::accumulate_tangent_escape(
       Eigen::Vector3d best_direction = escape_directions.front();
       double best_direction_score = -std::numeric_limits<double>::infinity();
       for (const auto & direction : escape_directions) {
-        const double goal_score = direction.dot(goal_direction);
+        const double goal_score = goal_tangent_direction.has_value() ?
+          direction.dot(goal_tangent_direction.value()) :
+          0.0;
         const double continuity_score = tangent_escape_previous_tangent_valid_ ?
           direction.dot(tangent_escape_previous_tangent_) :
           0.0;
@@ -1787,8 +1803,7 @@ void PinocchioDirectRmpSolver::accumulate_tangent_escape(
         }
       }
 
-      const double inward_goal = std::max(0.0, -goal_normal_dot);
-      const double candidate_score = activation * (1.0 + inward_goal + best_direction_score);
+      const double candidate_score = activation * (1.0 + beta + best_direction_score);
       if (candidate_score <= best_score) {
         continue;
       }
@@ -1802,7 +1817,7 @@ void PinocchioDirectRmpSolver::accumulate_tangent_escape(
       candidate.curvature = point_curvature;
       candidate.activation = activation;
       candidate.score = candidate_score;
-      candidate.has_tangent = tangent_allowed;
+      candidate.has_tangent = true;
       best_candidate = candidate;
       best_score = candidate_score;
     }
@@ -1813,27 +1828,17 @@ void PinocchioDirectRmpSolver::accumulate_tangent_escape(
   }
 
   const auto & candidate = best_candidate.value();
-  Eigen::Vector3d desired_acceleration =
-    -std::max(params.damping_gain, 0.0) * candidate.velocity;
-  Eigen::Matrix3d leaf_metric = Eigen::Matrix3d::Zero();
-  if (candidate.has_tangent && tangent_metric_scalar > 0.0) {
-    const double desired_tangent_accel = candidate.activation * params.tangent_gain;
-    const double current_tangent_velocity = candidate.velocity.dot(candidate.tangent);
-    desired_acceleration +=
-      desired_tangent_accel * candidate.tangent -
-      std::max(params.damping_gain, 0.0) * current_tangent_velocity * candidate.tangent;
-    leaf_metric +=
-      candidate.activation * tangent_metric_scalar *
-      (candidate.tangent * candidate.tangent.transpose());
-  }
-  if (normal_metric_scalar > 0.0 && params.normal_gain > 0.0) {
-    const double inward_velocity = std::max(0.0, -candidate.normal.dot(candidate.velocity));
-    desired_acceleration +=
-      candidate.activation * params.normal_gain * (1.0 + inward_velocity) * candidate.normal;
-    leaf_metric +=
-      candidate.activation * normal_metric_scalar *
-      (candidate.normal * candidate.normal.transpose());
-  }
+  const double current_tangent_velocity = candidate.velocity.dot(candidate.tangent);
+  const double desired_tangent_accel = std::clamp(
+    std::max(params.velocity_gain, 0.0) *
+    (std::max(params.escape_speed, 0.0) - current_tangent_velocity),
+    0.0,
+    std::max(params.max_accel, 0.0));
+  const Eigen::Vector3d desired_acceleration =
+    desired_tangent_accel * candidate.tangent;
+  const Eigen::Matrix3d leaf_metric =
+    candidate.activation * tangent_metric_scalar *
+    (candidate.tangent * candidate.tangent.transpose());
   if (leaf_metric.cwiseAbs().maxCoeff() <= 0.0) {
     return;
   }

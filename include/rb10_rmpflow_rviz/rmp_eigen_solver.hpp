@@ -117,6 +117,11 @@ struct TangentEscapeRmpParams
   double influence_distance{0.25};
   double tangent_gain{2.0};
   double normal_gain{0.0};
+  double escape_speed{0.05};
+  double velocity_gain{5.0};
+  double max_accel{0.8};
+  double goal_block_beta_on{0.5};
+  double goal_block_beta_full{0.94};
   int candidate_count{16};
   double candidate_lookahead{0.08};
   double goal_weight{1.0};
