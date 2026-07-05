@@ -16,7 +16,7 @@ rmpflow_controller:
     # collision_rmp_repulsion_gain: 100.0
     collision_rmp_repulsion_gain: 500.0
     collision_rmp_repulsion_std_dev: 0.05
-    collision_rmp_metric_modulation_radius: 0.30
+    collision_rmp_metric_modulation_radius: 0.3
     # collision_rmp_metric_scalar: 0.0
     collision_rmp_metric_scalar: 100000.0
     # collision_rmp_metric_exploder_std_dev: 0.01
@@ -120,27 +120,32 @@ rmpflow_controller:
     publish_repulsion_metric_markers: false
     repulsion_metric_marker_min_norm: 0.01
     repulsion_metric_marker_dot_diameter: 0.04
+
+    # TCP acceleration visualization
     publish_tcp_accel_marker: true
     tcp_accel_marker_topic: "tcp_accel_marker"
     tcp_accel_marker_max_length: 0.15
     tcp_accel_marker_norm_for_max_length: 2.0
     tcp_accel_marker_min_norm: 0.001
-    enable_tangent_escape_filter: false
-    enable_tangent_escape_rmp: false
-    tangent_escape_rmp_metric_scalar: 0.0
+
+    # Tangent escape RMP leaf
+    # Adds a tangent-only rank-1 metric and velocity-servo tangent acceleration
+    # inside the RMP solve.
+    enable_tangent_escape_rmp: true
+    tangent_escape_rmp_metric_scalar: 100000.0
     tangent_escape_rmp_normal_metric_scalar: 0.0
     tangent_escape_rmp_damping_gain: 0.0
     tangent_escape_rmp_escape_speed: 0.05
-    tangent_escape_rmp_velocity_gain: 5.0
-    tangent_escape_rmp_max_accel: 0.8
+    tangent_escape_rmp_velocity_gain: 20.0
+    tangent_escape_rmp_max_accel: 10.0
     tangent_escape_rmp_goal_block_beta_on: 0.5
     tangent_escape_rmp_goal_block_beta_full: 0.94
+
+    # Tangent escape shared activation and candidate selection
+    # These still use historical tangent_escape_filter_* names, but they
+    # configure the candidate/activation path used by the tangent RMP leaf too.
     tangent_escape_filter_safe_distance: 0.08
     tangent_escape_filter_influence_distance: 0.20
-    tangent_escape_filter_tangent_gain: 30.0
-    tangent_escape_filter_normal_gain: 0.0
-    tangent_escape_filter_damping: 0.02
-    tangent_escape_filter_max_delta_qdd: 15.0
     tangent_escape_filter_candidate_count: 16
     tangent_escape_filter_candidate_lookahead: 0.08
     tangent_escape_filter_goal_weight: 1.0
@@ -151,7 +156,18 @@ rmpflow_controller:
     tangent_escape_filter_branch_hold_weight: 0.5
     tangent_escape_filter_min_activation: 0.05
     tangent_escape_filter_min_tangent_norm: 0.0001
+
+    # Tangent escape post-solve filter
+    # Directly modifies qdd after the RMP solve. Keep disabled when using the
+    # tangent escape RMP leaf as the primary implementation.
+    enable_tangent_escape_filter: false
+    tangent_escape_filter_tangent_gain: 30.0
+    tangent_escape_filter_normal_gain: 0.0
+    tangent_escape_filter_damping: 0.02
+    tangent_escape_filter_max_delta_qdd: 15.0
     tangent_escape_filter_goal_normal_dot_threshold: 1.0
+
+    # Tangent escape filter debug output
     publish_tangent_escape_filter_debug: false
     tangent_escape_filter_marker_topic: "tangent_escape_filter_markers"
     tangent_escape_filter_marker_length: 0.12
@@ -641,35 +657,35 @@ proximity_obstacle_bridge:
       - true   # proximity_distance9 -> tof3_1_W
       - false   # proximity_distance10 -> tof3_1_N
       - true  # proximity_distance11 -> tof3_1_E
-      - true  # proximity_distance13 -> tof2_N
-      - true  # proximity_distance14 -> tof2_W
-      - true  # proximity_distance15 -> tof2_S
-      - true  # proximity_distance16 -> tof2_E
+      - false  # proximity_distance13 -> tof2_N
+      - false  # proximity_distance14 -> tof2_W
+      - false  # proximity_distance15 -> tof2_S
+      - false  # proximity_distance16 -> tof2_E
       - false # proximity_distance17 -> tof2_E
       - false  # proximity_distance18 -> tof2_S
       - false   # proximity_distance19 -> tof2_W
       - false  # proximity_distance20 -> tof2_N
     trigger_distances:
-      - 0.15
-      - 0.15
-      - 0.15
-      - 0.15
-      - 0.15
-      - 0.15
-      - 0.15
-      - 0.15
-      - 0.15
-      - 0.15
-      - 0.15
-      - 0.15
-      - 0.15
-      - 0.15
-      - 0.15
-      - 0.15
-      - 0.15
-      - 0.15
-      - 0.15
-      - 0.15
+      - 0.5
+      - 0.5
+      - 0.5
+      - 0.5
+      - 0.30
+      - 0.30
+      - 0.30
+      - 0.30
+      - 0.30
+      - 0.30
+      - 0.30
+      - 0.30
+      - 0.30
+      - 0.30
+      - 0.30
+      - 0.30
+      - 0.30
+      - 0.30
+      - 0.30
+      - 0.30
     range_topics:
       - "proximity_distance1"
       - "proximity_distance2"

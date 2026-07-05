@@ -32,6 +32,7 @@ def generate_launch_description():
 
     robot_ip = LaunchConfiguration("robot_ip")
     use_rviz = LaunchConfiguration("use_rviz")
+    rviz_config = LaunchConfiguration("rviz_config")
     cb_simulation = LaunchConfiguration("cb_simulation")
     use_direct_hardware_backend = LaunchConfiguration("use_direct_hardware_backend")
     real_joint_state_source = LaunchConfiguration("real_joint_state_source")
@@ -40,6 +41,8 @@ def generate_launch_description():
     use_obstacles = LaunchConfiguration("use_obstacles")
     use_proximity_bridge = LaunchConfiguration("use_proximity_bridge")
     proximity_surface_visualization = LaunchConfiguration("proximity_surface_visualization")
+    proximity_collision_obstacle_topic = LaunchConfiguration("proximity_collision_obstacle_topic")
+    proximity_visualization_obstacle_topic = LaunchConfiguration("proximity_visualization_obstacle_topic")
     surface_patch_enabled = LaunchConfiguration("surface_patch_enabled")
     surface_patch_collision_memory_enabled = LaunchConfiguration(
         "surface_patch_collision_memory_enabled"
@@ -250,6 +253,8 @@ def generate_launch_description():
                     ]),
                     value_type=bool,
                 ),
+                "obstacle_topic": proximity_collision_obstacle_topic,
+                "visualization_obstacle_topic": proximity_visualization_obstacle_topic,
             },
         ],
     )
@@ -292,7 +297,7 @@ def generate_launch_description():
         name="rviz2",
         output="screen",
         condition=IfCondition(use_rviz),
-        arguments=["-d", rviz_config_path] if os.path.exists(rviz_config_path) else [],
+        arguments=["-d", rviz_config],
     )
 
     return LaunchDescription([
@@ -310,6 +315,11 @@ def generate_launch_description():
             "use_rviz",
             default_value="true",
             description="Start RViz.",
+        ),
+        DeclareLaunchArgument(
+            "rviz_config",
+            default_value=rviz_config_path,
+            description="Absolute path to the RViz config file.",
         ),
         DeclareLaunchArgument(
             "cb_simulation",
@@ -362,6 +372,16 @@ def generate_launch_description():
                 "Publish RViz-only fixed surface patches from proximity sensor range hits. "
                 "When use_proximity_bridge is false this does not publish collision obstacles."
             ),
+        ),
+        DeclareLaunchArgument(
+            "proximity_collision_obstacle_topic",
+            default_value="obstacles",
+            description="MarkerArray topic used by proximity_obstacle_bridge for RMP collision obstacles.",
+        ),
+        DeclareLaunchArgument(
+            "proximity_visualization_obstacle_topic",
+            default_value="obstacle_markers",
+            description="MarkerArray topic used by proximity_obstacle_bridge for RViz obstacle markers.",
         ),
         DeclareLaunchArgument(
             "surface_patch_enabled",
