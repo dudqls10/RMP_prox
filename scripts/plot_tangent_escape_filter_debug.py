@@ -72,8 +72,12 @@ def vector(row: Dict[str, str], prefix: str) -> Tuple[float, float, float]:
 def goal_points(rows: Sequence[Dict[str, str]]) -> List[Tuple[float, float, float]]:
     goals: List[Tuple[float, float, float]] = []
     for row in rows:
-        if all(key in row for key in ("goal_pose_x", "goal_pose_y", "goal_pose_z")):
+        if all(key in row for key in ("controller_goal_x", "controller_goal_y", "controller_goal_z")):
+            goal = vector(row, "controller_goal")
+        elif all(key in row for key in ("goal_pose_x", "goal_pose_y", "goal_pose_z")):
             goal = vector(row, "goal_pose")
+        elif all(key in row for key in ("input_goal_x", "input_goal_y", "input_goal_z")):
+            goal = vector(row, "input_goal")
         else:
             goal = vector(row, "goal")
         if not all(math.isfinite(value) for value in goal):
@@ -144,7 +148,6 @@ def set_axes_equal(ax, points: Sequence[Sequence[float]]) -> None:
 
 def require_columns(fieldnames: Sequence[str]) -> None:
     required = (
-        "timestamp_unix",
         "tangent_escape_active",
         "tangent_escape_cp_x",
         "tangent_escape_cp_y",
@@ -168,6 +171,8 @@ def require_columns(fieldnames: Sequence[str]) -> None:
         "tangent_escape_activation",
     )
     missing = [column for column in required if column not in fieldnames]
+    if "timestamp_unix" not in fieldnames and "time_ros_s" not in fieldnames:
+        missing.append("timestamp_unix or time_ros_s")
     if missing:
         raise ValueError(
             "Missing tangent escape columns. Record again after rebuilding/running the updated "

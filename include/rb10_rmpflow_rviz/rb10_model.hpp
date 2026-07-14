@@ -28,6 +28,8 @@ struct SensorControlPointSpec
   std::size_t parent_link;
   Eigen::Vector3d offset;
   double radius;
+  Eigen::Vector3d local_normal;
+  Eigen::Vector3d local_tangent_bias;
 };
 
 struct ControlPoint
@@ -64,6 +66,12 @@ public:
   using JointVector = Eigen::Matrix<double, 6, 1>;
   using Jacobian = Eigen::Matrix<double, 3, 6>;
 
+  struct PredictiveDuplicateSuccessors
+  {
+    std::array<std::size_t, 2> indices{0, 0};
+    std::size_t count{0};
+  };
+
   enum LinkIndex : std::size_t
   {
     BASE_LINK = 0,
@@ -98,6 +106,53 @@ public:
     3.14159, 3.14159, 3.14159, 3.14159, 3.14159, 3.14159
   };
 
+  static constexpr PredictiveDuplicateSuccessors predictive_duplicate_successors(
+    std::size_t sensor_index)
+  {
+    PredictiveDuplicateSuccessors successors;
+    switch (sensor_index) {
+      case 4:   // tof_S -> tof3_1_S
+        successors.indices[0] = 8;
+        successors.count = 1;
+        break;
+      case 5:   // tof_E -> tof3_1_E
+        successors.indices[0] = 11;
+        successors.count = 1;
+        break;
+      case 6:   // tof_N -> tof3_1_N
+        successors.indices[0] = 10;
+        successors.count = 1;
+        break;
+      case 7:   // tof_W -> tof3_1_W
+        successors.indices[0] = 9;
+        successors.count = 1;
+        break;
+      case 8:   // tof3_1_S -> tof2_1_S / tof2_S
+        successors.indices[0] = 13;
+        successors.indices[1] = 17;
+        successors.count = 2;
+        break;
+      case 9:   // tof3_1_W -> tof2_1_W / tof2_W
+        successors.indices[0] = 14;
+        successors.indices[1] = 18;
+        successors.count = 2;
+        break;
+      case 10:  // tof3_1_N -> tof2_1_N / tof2_N
+        successors.indices[0] = 15;
+        successors.indices[1] = 19;
+        successors.count = 2;
+        break;
+      case 11:  // tof3_1_E -> tof2_1_E / tof2_E
+        successors.indices[0] = 12;
+        successors.indices[1] = 16;
+        successors.count = 2;
+        break;
+      default:
+        break;
+    }
+    return successors;
+  }
+
   inline static const std::array<ControlPointSpec, 5> control_point_specs{{
     {LINK1, LINK3, 10, 0.12},
     {LINK3, LINK4, 8, 0.10},
@@ -107,26 +162,26 @@ public:
   }};
 
   inline static const std::array<SensorControlPointSpec, 20> sensor_control_points{{
-    {"tof6_1_L", LINK5, Eigen::Vector3d(-0.06, 0.0, 0.11715),  0.05},
-    {"tof6_1_F", LINK5, Eigen::Vector3d(0.0, 0.0, 0.17715), 0.05},
-    {"tof6_1_R", LINK5, Eigen::Vector3d(0.06, 0.0, 0.11715), 0.05},
-    {"tof6_1_U", LINK5, Eigen::Vector3d(0.0, 0.0667, 0.11715), 0.05},
-    {"tof_S", LINK3_5, Eigen::Vector3d(0.0645, 0.0, 0.405075),  0.05},
-    {"tof_E", LINK3_5, Eigen::Vector3d(0.0, 0.0645, 0.405075),  0.05},
-    {"tof_N", LINK3_5, Eigen::Vector3d(-0.0645, 0.0, 0.405075), 0.05},
-    {"tof_W", LINK3_5, Eigen::Vector3d(0.0, -0.0645, 0.405075), 0.05},
-    {"tof3_1_S", LINK3_5, Eigen::Vector3d(0.0645, 0.0, 0.205075),  0.05},
-    {"tof3_1_W", LINK3_5, Eigen::Vector3d(0.0, -0.0645, 0.205075), 0.05},
-    {"tof3_1_N", LINK3_5, Eigen::Vector3d(-0.0645, 0.0, 0.205075), 0.05},
-    {"tof3_1_E", LINK3_5, Eigen::Vector3d(0.0, 0.0645, 0.205075),  0.05},
-    {"tof2_1_E", LINK2, Eigen::Vector3d(0.0, -0.1085, 0.2262), 0.05},
-    {"tof2_1_S", LINK2, Eigen::Vector3d(0.079, -0.1875, 0.2262), 0.05},
-    {"tof2_1_W", LINK2, Eigen::Vector3d(0.0, -0.2665, 0.2262), 0.05},
-    {"tof2_1_N", LINK2, Eigen::Vector3d(-0.079, -0.1875, 0.2262), 0.05},
-    {"tof2_E", LINK2, Eigen::Vector3d(0.0, -0.1085, 0.4262), 0.05},
-    {"tof2_S", LINK2, Eigen::Vector3d(0.079, -0.1875, 0.4262), 0.05},
-    {"tof2_W", LINK2, Eigen::Vector3d(0.0, -0.2665, 0.4262), 0.05},
-    {"tof2_N", LINK2, Eigen::Vector3d(-0.079, -0.1875, 0.4262), 0.05},
+    {"tof6_1_L", LINK5, Eigen::Vector3d(-0.06, 0.0, 0.11715), 0.05, Eigen::Vector3d(-1.0, 0.0, 0.0), Eigen::Vector3d(0.0, 0.0, 1.0)},
+    {"tof6_1_F", LINK5, Eigen::Vector3d(0.0, 0.0, 0.17715), 0.05, Eigen::Vector3d(0.0, 0.0, 1.0), Eigen::Vector3d(0.0, 1.0, 0.0)},
+    {"tof6_1_R", LINK5, Eigen::Vector3d(0.06, 0.0, 0.11715), 0.05, Eigen::Vector3d(1.0, 0.0, 0.0), Eigen::Vector3d(0.0, 0.0, 1.0)},
+    {"tof6_1_U", LINK5, Eigen::Vector3d(0.0, 0.0667, 0.11715), 0.05, Eigen::Vector3d(0.0, 1.0, 0.0), Eigen::Vector3d(0.0, 0.0, 1.0)},
+    {"tof_S", LINK3_5, Eigen::Vector3d(0.0645, 0.0, 0.405075), 0.05, Eigen::Vector3d(1.0, 0.0, 0.0), Eigen::Vector3d(0.0, 0.0, 1.0)},
+    {"tof_E", LINK3_5, Eigen::Vector3d(0.0, 0.0645, 0.405075), 0.05, Eigen::Vector3d(0.0, 1.0, 0.0), Eigen::Vector3d(0.0, 0.0, 1.0)},
+    {"tof_N", LINK3_5, Eigen::Vector3d(-0.0645, 0.0, 0.405075), 0.05, Eigen::Vector3d(-1.0, 0.0, 0.0), Eigen::Vector3d(0.0, 0.0, 1.0)},
+    {"tof_W", LINK3_5, Eigen::Vector3d(0.0, -0.0645, 0.405075), 0.05, Eigen::Vector3d(0.0, -1.0, 0.0), Eigen::Vector3d(0.0, 0.0, -1.0)},
+    {"tof3_1_S", LINK3_5, Eigen::Vector3d(0.0645, 0.0, 0.205075), 0.05, Eigen::Vector3d(1.0, 0.0, 0.0), Eigen::Vector3d(0.0, 0.0, 1.0)},
+    {"tof3_1_W", LINK3_5, Eigen::Vector3d(0.0, -0.0645, 0.205075), 0.05, Eigen::Vector3d(0.0, -1.0, 0.0), Eigen::Vector3d(0.0, 0.0, -1.0)},
+    {"tof3_1_N", LINK3_5, Eigen::Vector3d(-0.0645, 0.0, 0.205075), 0.05, Eigen::Vector3d(-1.0, 0.0, 0.0), Eigen::Vector3d(0.0, 0.0, 1.0)},
+    {"tof3_1_E", LINK3_5, Eigen::Vector3d(0.0, 0.0645, 0.205075), 0.05, Eigen::Vector3d(0.0, 1.0, 0.0), Eigen::Vector3d(0.0, 0.0, 1.0)},
+    {"tof2_1_E", LINK2, Eigen::Vector3d(0.0, -0.1085, 0.2262), 0.05, Eigen::Vector3d(0.0, 1.0, 0.0), Eigen::Vector3d(0.0, 0.0, 1.0)},
+    {"tof2_1_S", LINK2, Eigen::Vector3d(0.079, -0.1875, 0.2262), 0.05, Eigen::Vector3d(1.0, 0.0, 0.0), Eigen::Vector3d(0.0, 0.0, 1.0)},
+    {"tof2_1_W", LINK2, Eigen::Vector3d(0.0, -0.2665, 0.2262), 0.05, Eigen::Vector3d(0.0, -1.0, 0.0), Eigen::Vector3d(0.0, 0.0, -1.0)},
+    {"tof2_1_N", LINK2, Eigen::Vector3d(-0.079, -0.1875, 0.2262), 0.05, Eigen::Vector3d(-1.0, 0.0, 0.0), Eigen::Vector3d(0.0, 0.0, 1.0)},
+    {"tof2_E", LINK2, Eigen::Vector3d(0.0, -0.1085, 0.4262), 0.05, Eigen::Vector3d(0.0, 1.0, 0.0), Eigen::Vector3d(0.0, 0.0, 1.0)},
+    {"tof2_S", LINK2, Eigen::Vector3d(0.079, -0.1875, 0.4262), 0.05, Eigen::Vector3d(1.0, 0.0, 0.0), Eigen::Vector3d(0.0, 0.0, 1.0)},
+    {"tof2_W", LINK2, Eigen::Vector3d(0.0, -0.2665, 0.4262), 0.05, Eigen::Vector3d(0.0, -1.0, 0.0), Eigen::Vector3d(0.0, 0.0, -1.0)},
+    {"tof2_N", LINK2, Eigen::Vector3d(-0.079, -0.1875, 0.4262), 0.05, Eigen::Vector3d(-1.0, 0.0, 0.0), Eigen::Vector3d(0.0, 0.0, 1.0)},
   }};
 
   static Eigen::Affine3d origin_transform(

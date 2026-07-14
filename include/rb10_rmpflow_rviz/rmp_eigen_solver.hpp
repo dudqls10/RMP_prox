@@ -110,29 +110,55 @@ struct CollisionRmpParams
 struct TangentEscapeRmpParams
 {
   bool enabled{false};
-  double metric_scalar{0.0};
+  std::string leaf_mode{"softmax_gds"};
+  double metric_scalar{150.0};
   double normal_metric_scalar{0.0};
-  double damping_gain{0.0};
+  double damping_gain{4.0};
   double safe_distance{0.08};
   double influence_distance{0.25};
-  double tangent_gain{2.0};
+  double tangent_gain{1.0};
+  double position_gain{16.0};
+  double escape_length{0.06};
+  double collision_accel_scale{0.001};
   double normal_gain{0.0};
   double escape_speed{0.05};
   double velocity_gain{5.0};
-  double max_accel{0.8};
+  double max_accel{0.6};
   double goal_block_beta_on{0.5};
   double goal_block_beta_full{0.94};
+  double nominal_prediction_dt{0.01};
+  double nominal_min_speed{1e-4};
+  double tangent_bias_weight{1.0};
+  double softmax_beta{4.0};
   int candidate_count{16};
   double candidate_lookahead{0.08};
   double goal_weight{1.0};
   double continuity_weight{0.5};
   double up_weight{0.0};
   double duplicate_risk_weight{2.0};
+  double duplicate_risk_min_alignment{0.70};
   double adjacent_block_weight{1.0};
   double branch_hold_weight{0.5};
   double min_activation{0.05};
   double min_tangent_norm{1e-4};
+  double stable_mode_normal_tolerance{0.20};
   double goal_normal_dot_threshold{1.0};
+  bool supervisor_enabled{true};
+  double supervisor_dt{0.01};
+  double branch_hold_duration{0.6};
+  double branch_hold_max_adjacent_risk{0.9};
+  double stuck_activation_threshold{0.5};
+  double stuck_velocity_threshold{0.01};
+  double stuck_progress_threshold{0.005};
+  double stuck_time_threshold{0.6};
+  double stuck_metric_boost{1.2};
+  double stuck_accel_boost{1.05};
+  double blocked_memory_update_duration{0.8};
+  double blocked_memory_progress_threshold{0.008};
+  double blocked_memory_clearance_improvement{0.01};
+  double blocked_memory_penalty_weight{2.0};
+  double blocked_memory_decay_time{6.0};
+  double recovery_duration{0.5};
 };
 
 struct DampingRmpParams
@@ -296,6 +322,7 @@ struct RmpSolveResult
   RB10Model::JointVector qdd{RB10Model::JointVector::Zero()};
   Eigen::Matrix<double, 6, 6> metric{Eigen::Matrix<double, 6, 6>::Zero()};
   RB10Model::JointVector force{RB10Model::JointVector::Zero()};
+  std::vector<double> tangent_escape_rmp_data{0.0};
 };
 
 class EigenRmpSolver
@@ -331,9 +358,9 @@ public:
     JointVector scaled_force = force / max_abs;
     scaled_metric += config_.solve_offset * Matrix6::Identity();
 
-    JointVector qdd = scaled_metric.ldlt().solve(scaled_force);
+    JointVector qdd = scaled_metric.ldlt().solve(scaled_force).eval();
     if (!qdd.allFinite()) {
-      qdd = scaled_metric.completeOrthogonalDecomposition().solve(scaled_force);
+      qdd = scaled_metric.completeOrthogonalDecomposition().solve(scaled_force).eval();
     }
     if (!qdd.allFinite()) {
       qdd.setZero();

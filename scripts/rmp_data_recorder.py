@@ -28,6 +28,7 @@ class RmpDataRecorder(Node):
         )
         self.declare_parameter("output_prefix", "rmp_dataset")
         self.declare_parameter("mode", "simulation")
+        self.declare_parameter("range_unit", "message_range")
         self.declare_parameter("auto_start", True)
         self.declare_parameter("joint_state_topic", "/joint_states")
         self.declare_parameter(
@@ -39,6 +40,7 @@ class RmpDataRecorder(Node):
         self.output_directory = str(self.get_parameter("output_directory").value)
         self.output_prefix = str(self.get_parameter("output_prefix").value)
         self.mode = str(self.get_parameter("mode").value)
+        self.range_unit = str(self.get_parameter("range_unit").value).strip()
         self.auto_start = self._as_bool(self.get_parameter("auto_start").value)
         self.joint_state_topic = str(self.get_parameter("joint_state_topic").value)
         self.range_topics = list(self.get_parameter("range_topics").value)
@@ -183,6 +185,7 @@ class RmpDataRecorder(Node):
             self.recording_handle.write(f"# started_at,{datetime.now().isoformat()}\n")
             self.recording_handle.write(f"# joint_state_topic,{self.joint_state_topic}\n")
             self.recording_handle.write(f"# range_topics,{';'.join(self.range_topics)}\n")
+            self.recording_handle.write(f"# range_unit,{self.range_unit}\n")
             self.recording_writer = csv.writer(self.recording_handle)
             self.recording_writer.writerow(self._header())
             self.recording_handle.flush()

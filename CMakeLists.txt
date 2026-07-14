@@ -285,7 +285,14 @@ install(
     scripts/analyze_rmp_dataset.py
     scripts/create_tuning_experiment.py
     scripts/move_to_saved_start_pose.py
-    scripts/joint_velocity_logger.py
+	    scripts/joint_velocity_logger.py
+	    scripts/fake_proximity_scenario.py
+	    scripts/fake_proximity_scenario_v2.py
+	    scripts/check_tangent_escape_stage0_fake.py
+    scripts/check_tangent_escape_closed_loop.py
+    scripts/check_tangent_escape_rmp_validation.py
+    scripts/validate_tangent_escape_stability_suite.py
+    scripts/tune_tangent_escape_rmp_fake.py
     scripts/rmp_goal_logger.py
     scripts/rmpflow_trace_logger.py
     scripts/rmp_goal_sequence_visualizer.py
@@ -293,6 +300,8 @@ install(
 	    scripts/experiment_goal_runner.py
 	    scripts/plot_ee_trajectory_3d.py
 	    scripts/plot_tcp_accel_direction.py
+	    scripts/plot_tangent_escape_lyapunov.py
+	    scripts/plot_tangent_escape_geometry_report.py
 	    scripts/plot_tangent_escape_filter_debug.py
 	    scripts/plot_tangent_escape_filter_report.py
 	    scripts/plot_velocity_filter_comparison.py

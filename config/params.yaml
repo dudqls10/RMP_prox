@@ -128,18 +128,47 @@ rmpflow_controller:
     tcp_accel_marker_norm_for_max_length: 2.0
     tcp_accel_marker_min_norm: 0.001
 
-    # Tangent escape RMP leaf
-    # Adds a tangent-only rank-1 metric and velocity-servo tangent acceleration
-    # inside the RMP solve.
-    enable_tangent_escape_rmp: true
-    tangent_escape_rmp_metric_scalar: 100000.0
+    # Stage-3 Tangent Escape RMP leaf.
+    # Default mode is multi-candidate softmax GDS. Stage-2 single-branch GDS is
+    # still available with gds, and Stage-1 direct acceleration with direct_accel.
+    enable_tangent_escape_rmp: false
+    tangent_escape_rmp_leaf_mode: "softmax_gds"
+    tangent_escape_rmp_metric_scalar: 0.0
     tangent_escape_rmp_normal_metric_scalar: 0.0
-    tangent_escape_rmp_damping_gain: 0.0
+    tangent_escape_rmp_damping_gain: 4.0
+    tangent_escape_rmp_tangent_gain: 1.0
+    tangent_escape_rmp_position_gain: 16.0
+    tangent_escape_rmp_escape_length: 0.06
+    # Multiplies the Collision RMP scalar acceleration in collision_scaled mode.
+    tangent_escape_rmp_collision_accel_scale: 0.001
     tangent_escape_rmp_escape_speed: 0.05
     tangent_escape_rmp_velocity_gain: 20.0
-    tangent_escape_rmp_max_accel: 10.0
+    tangent_escape_rmp_max_accel: 0.6
     tangent_escape_rmp_goal_block_beta_on: 0.5
     tangent_escape_rmp_goal_block_beta_full: 0.94
+    tangent_escape_rmp_nominal_prediction_dt: 0.01
+    tangent_escape_rmp_nominal_min_speed: 0.0001
+    tangent_escape_rmp_tangent_bias_weight: 1.0
+    tangent_escape_rmp_softmax_beta: 4.0
+    tangent_escape_rmp_supervisor_enabled: false
+    tangent_escape_rmp_supervisor_dt: 0.01
+    tangent_escape_rmp_branch_hold_duration: 0.6
+    tangent_escape_rmp_branch_hold_max_adjacent_risk: 0.9
+    tangent_escape_rmp_stable_mode_normal_tolerance: 0.20
+    tangent_escape_rmp_stuck_activation_threshold: 0.5
+    tangent_escape_rmp_stuck_velocity_threshold: 0.01
+    tangent_escape_rmp_stuck_progress_threshold: 0.005
+    tangent_escape_rmp_stuck_time_threshold: 0.6
+    tangent_escape_rmp_stuck_metric_boost: 1.2
+    tangent_escape_rmp_stuck_accel_boost: 1.05
+    tangent_escape_rmp_blocked_memory_update_duration: 0.8
+    tangent_escape_rmp_blocked_memory_progress_threshold: 0.008
+    tangent_escape_rmp_blocked_memory_clearance_improvement: 0.01
+    tangent_escape_rmp_blocked_memory_penalty_weight: 2.0
+    tangent_escape_rmp_blocked_memory_decay_time: 6.0
+    tangent_escape_rmp_recovery_duration: 0.5
+    publish_tangent_escape_rmp_data: false
+    tangent_escape_rmp_data_topic: "/tangent_escape_rmp_data"
 
     # Tangent escape shared activation and candidate selection
     # These still use historical tangent_escape_filter_* names, but they
@@ -152,6 +181,8 @@ rmpflow_controller:
     tangent_escape_filter_continuity_weight: 0.5
     tangent_escape_filter_up_weight: 0.0
     tangent_escape_filter_duplicate_risk_weight: 2.0
+    tangent_escape_filter_duplicate_risk_min_alignment: 0.70
+    tangent_escape_filter_direction_switch_margin: 0.08
     tangent_escape_filter_adjacent_block_weight: 1.0
     tangent_escape_filter_branch_hold_weight: 0.5
     tangent_escape_filter_min_activation: 0.05
@@ -161,10 +192,12 @@ rmpflow_controller:
     # Directly modifies qdd after the RMP solve. Keep disabled when using the
     # tangent escape RMP leaf as the primary implementation.
     enable_tangent_escape_filter: false
-    tangent_escape_filter_tangent_gain: 30.0
+    tangent_escape_filter_tangent_gain: 10.0
     tangent_escape_filter_normal_gain: 0.0
     tangent_escape_filter_damping: 0.02
-    tangent_escape_filter_max_delta_qdd: 15.0
+    tangent_escape_filter_max_delta_qdd: 4.0
+    tangent_escape_filter_max_delta_qdd_rate: 40.0
+    tangent_escape_filter_release_delta_qdd_rate: 30.0
     tangent_escape_filter_goal_normal_dot_threshold: 1.0
 
     # Tangent escape filter debug output
@@ -175,6 +208,10 @@ rmpflow_controller:
     tangent_escape_filter_data_topic: "/tangent_escape_filter_data"
     publish_tangent_escape_filter_candidate_data: true
     tangent_escape_filter_candidate_data_topic: "/tangent_escape_filter_candidates"
+    publish_tangent_escape_geometry_debug: false
+    tangent_escape_geometry_data_topic: "/tangent_escape_geometry_data"
+    tangent_escape_geometry_marker_topic: "tangent_escape_geometry_markers"
+    tangent_escape_geometry_marker_length: 0.12
     goal_x: 0.6
     goal_y: -0.4
     goal_z: 0.6
@@ -654,9 +691,9 @@ proximity_obstacle_bridge:
       - true   # proximity_distance8 -> tof_N
       - true   # proximity_distance5 -> tof_W
       - false   # proximity_distance12 -> tof3_1_S
-      - true   # proximity_distance9 -> tof3_1_W
+      - false  # proximity_distance9 -> tof3_1_W
       - false   # proximity_distance10 -> tof3_1_N
-      - true  # proximity_distance11 -> tof3_1_E
+      - false # proximity_distance11 -> tof3_1_E
       - false  # proximity_distance13 -> tof2_N
       - false  # proximity_distance14 -> tof2_W
       - false  # proximity_distance15 -> tof2_S

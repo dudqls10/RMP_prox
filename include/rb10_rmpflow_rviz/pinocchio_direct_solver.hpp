@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -43,6 +45,10 @@ public:
 
 private:
   static double sigmoid(double value);
+  static double collision_scalar_acceleration(
+    double clearance,
+    double clearance_rate,
+    const CollisionRmpParams & params);
 
   static void accumulate_scalar_leaf(
     bool use_natural_rmp,
@@ -71,6 +77,47 @@ private:
   static Eigen::Vector3d axis_unit_vector(const std::string & axis_name);
   static Eigen::VectorXd flatten_control_points(const KinematicsContext & context);
   static Eigen::MatrixXd stack_control_point_jacobians(const KinematicsContext & context);
+  static constexpr std::size_t tangent_escape_softmax_candidate_count_ = 5;
+
+  struct TangentEscapeGdsModeState
+  {
+    bool active{false};
+    Eigen::Vector3d origin{Eigen::Vector3d::Zero()};
+    Eigen::Vector3d tangent{Eigen::Vector3d::UnitX()};
+    Eigen::Vector3d obstacle_direction{Eigen::Vector3d::UnitX()};
+    double activation{0.0};
+    double branch_weight{0.0};
+    double goal_score{0.0};
+    double continuity_score{0.0};
+    double duplicate_risk{0.0};
+    double adjacent_risk{0.0};
+    double hold_bonus{0.0};
+    double blocked_penalty{0.0};
+    double base_score{0.0};
+    double score{0.0};
+    double metric_boost{1.0};
+    double accel_boost{1.0};
+    std::uint64_t generation{0};
+    int supervisor_mode{0};
+    bool hold_phase{false};
+  };
+
+  struct TangentEscapeSupervisorState
+  {
+    bool active{false};
+    int mode{0};
+    std::size_t control_point_index{0};
+    std::size_t slot{0};
+    Eigen::Vector3d tangent{Eigen::Vector3d::UnitX()};
+    double branch_age_s{0.0};
+    double hold_age_s{0.0};
+    double stuck_timer_s{0.0};
+    double recovery_timer_s{0.0};
+    double start_scalar_s{0.0};
+    double best_scalar_s{0.0};
+    double start_clearance{0.0};
+    double best_clearance{0.0};
+  };
 
   static int infer_node_dim(
     const RmpNodeConfig & node,
@@ -142,12 +189,15 @@ private:
     JointVector & force) const;
 
   void accumulate_tangent_escape(
+    const KinematicsContext & context,
     const NodeGeometry & geometry,
     const JointVector & qd,
     const Eigen::Vector3d & goal,
     const std::vector<ObstacleSphere> & obstacles,
+    const JointVector & nominal_qdd,
     Matrix6 & metric,
-    JointVector & force) const;
+    JointVector & force,
+    std::vector<double> * debug_data) const;
 
   void accumulate_joint_damping(
     const NodeGeometry & geometry,
@@ -166,18 +216,35 @@ private:
     const NodeGeometry & geometry,
     const JointVector & qd,
     const std::unordered_map<std::string, NodeGeometry> & cache,
+    const KinematicsContext & context,
     const std::unordered_map<std::string, Eigen::Vector3d> & vector_targets,
     const std::vector<ObstacleSphere> & obstacles,
     const std::unordered_map<std::string, ExternalRmpFeature> & external_rmps,
+    const JointVector * nominal_qdd,
     Matrix6 & metric,
-    JointVector & force) const;
+    JointVector & force,
+    std::vector<double> * tangent_escape_debug_data) const;
+  JointVector compute_nominal_joint_acceleration(
+    const JointVector & qd,
+    const std::unordered_map<std::string, NodeGeometry> & cache,
+    const KinematicsContext & context,
+    const std::unordered_map<std::string, Eigen::Vector3d> & vector_targets,
+    const std::unordered_map<std::string, ExternalRmpFeature> & external_rmps) const;
 
   EigenRmpConfig config_;
   std::shared_ptr<const PinocchioModel> model_;
+  mutable std::array<
+    TangentEscapeGdsModeState,
+    RB10Model::sensor_control_points.size()> tangent_escape_gds_modes_{};
+  mutable std::array<
+    std::array<TangentEscapeGdsModeState, tangent_escape_softmax_candidate_count_>,
+    RB10Model::sensor_control_points.size()> tangent_escape_softmax_gds_modes_{};
+  mutable TangentEscapeSupervisorState tangent_escape_supervisor_{};
+  mutable std::array<
+    std::array<double, tangent_escape_softmax_candidate_count_>,
+    RB10Model::sensor_control_points.size()> tangent_escape_blocked_memory_{};
+  mutable std::uint64_t tangent_escape_mode_generation_{0};
   std::shared_ptr<const void> compiled_state_;
-  mutable Eigen::Vector3d tangent_escape_previous_tangent_{Eigen::Vector3d::UnitX()};
-  mutable std::size_t tangent_escape_previous_control_point_index_{0};
-  mutable bool tangent_escape_previous_tangent_valid_{false};
 };
 
 }  // namespace rb10_rmpflow_rviz
