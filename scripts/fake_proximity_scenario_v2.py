@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import rclpy
+from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from sensor_msgs.msg import Range
 from std_msgs.msg import UInt8
@@ -118,7 +119,14 @@ def load_replay_csv(
             f"CSV is missing timestamp column '{timestamp_column}': {expanded_path}"
         )
 
-    expected_columns = [f"{distance_column_prefix}{index}" for index in range(1, 21)]
+    if "{index}" in distance_column_prefix:
+        expected_columns = [
+            distance_column_prefix.format(index=index) for index in range(1, 21)
+        ]
+    else:
+        expected_columns = [
+            f"{distance_column_prefix}{index}" for index in range(1, 21)
+        ]
     missing_columns = [name for name in expected_columns if name not in fieldnames]
     if missing_columns:
         raw_columns = [f"raw_distance{index}" for index in range(1, 21)]
@@ -132,7 +140,8 @@ def load_replay_csv(
             "CSV is missing distance columns: " + ", ".join(missing_columns)
         )
 
-    if "raw" in distance_column_prefix.strip().lower():
+    normalized_prefix = distance_column_prefix.strip().lower()
+    if "raw" in normalized_prefix and "effective_m" not in normalized_prefix:
         raise ValueError(
             "Raw sensor columns are not accepted as distances. Use proximity_distance1..20."
         )
@@ -225,7 +234,9 @@ class FakeProximityCsvReplay(Node):
         self.declare_parameter("start_offset_s", 0.0)
         self.declare_parameter("duration_s", 0.0)
         self.declare_parameter("start_delay_s", 1.0)
+        self.declare_parameter("start_trigger_topic", "")
         self.declare_parameter("loop", False)
+        self.declare_parameter("interpolate_ranges", False)
         self.declare_parameter("inactive_range_m", 0.90)
         self.declare_parameter("minimum_valid_range_m", 0.001)
         self.declare_parameter("maximum_valid_range_m", 10.0)
@@ -250,7 +261,13 @@ class FakeProximityCsvReplay(Node):
         self.start_offset_s = max(float(self.get_parameter("start_offset_s").value), 0.0)
         self.duration_s = max(float(self.get_parameter("duration_s").value), 0.0)
         self.start_delay_s = max(float(self.get_parameter("start_delay_s").value), 0.0)
+        self.start_trigger_topic = str(
+            self.get_parameter("start_trigger_topic").value
+        ).strip()
         self.loop = self._as_bool(self.get_parameter("loop").value)
+        self.interpolate_ranges = self._as_bool(
+            self.get_parameter("interpolate_ranges").value
+        )
         self.inactive_range_m = max(
             float(self.get_parameter("inactive_range_m").value), 0.0
         )
@@ -346,6 +363,15 @@ class FakeProximityCsvReplay(Node):
             )
 
         self.start_time = self.get_clock().now()
+        self.triggered = not bool(self.start_trigger_topic)
+        self.start_trigger_subscription = None
+        if self.start_trigger_topic:
+            self.start_trigger_subscription = self.create_subscription(
+                PoseStamped,
+                self.start_trigger_topic,
+                self._on_start_trigger,
+                10,
+            )
         self.finished_logged = False
         self.timer = self.create_timer(1.0 / self.publish_rate_hz, self._publish)
 
@@ -359,7 +385,9 @@ class FakeProximityCsvReplay(Node):
             f"input_rate={self.replay_data.input_rate_hz:.2f} Hz, "
             f"publish_rate={self.publish_rate_hz:.2f} Hz, playback_rate={self.playback_rate:.3f}, "
             f"window={self.window_start_s:.3f}-{self.window_end_s:.3f} s, "
-            f"loop={self.loop}, invalid_values={invalid_ratio:.1%}"
+            f"loop={self.loop}, interpolate={self.interpolate_ranges}, "
+            f"start_trigger={self.start_trigger_topic or 'immediate'}, "
+            f"invalid_values={invalid_ratio:.1%}"
         )
 
     @staticmethod
@@ -379,6 +407,15 @@ class FakeProximityCsvReplay(Node):
     def _elapsed_s(self) -> float:
         delta = self.get_clock().now() - self.start_time
         return float(delta.nanoseconds) * 1e-9
+
+    def _on_start_trigger(self, _msg: PoseStamped) -> None:
+        if self.triggered:
+            return
+        self.start_time = self.get_clock().now()
+        self.triggered = True
+        self.get_logger().info(
+            f"CSV proximity replay triggered by first message on {self.start_trigger_topic}"
+        )
 
     def _make_range_msg(self, topic_index: int, range_m: float) -> Range:
         msg = Range()
@@ -408,6 +445,9 @@ class FakeProximityCsvReplay(Node):
             self.rmp_flag_pub.publish(flag)
 
     def _publish(self) -> None:
+        if not self.triggered:
+            self._publish_ranges((), active=False)
+            return
         elapsed_s = self._elapsed_s()
         if elapsed_s < self.start_delay_s:
             self._publish_ranges((), active=False)
@@ -431,7 +471,23 @@ class FakeProximityCsvReplay(Node):
             replay_timestamp_s,
         ) - 1
         sample_index = min(max(sample_index, 0), len(self.replay_data.ranges_m) - 1)
-        self._publish_ranges(self.replay_data.ranges_m[sample_index], active=True)
+        ranges_m = self.replay_data.ranges_m[sample_index]
+        if self.interpolate_ranges and sample_index + 1 < len(self.replay_data.ranges_m):
+            left_time = self.replay_data.timestamps_s[sample_index]
+            right_time = self.replay_data.timestamps_s[sample_index + 1]
+            interval = right_time - left_time
+            if interval > 1e-12:
+                ratio = min(max((replay_timestamp_s - left_time) / interval, 0.0), 1.0)
+                left_ranges = self.replay_data.ranges_m[sample_index]
+                right_ranges = self.replay_data.ranges_m[sample_index + 1]
+                interpolated: List[Optional[float]] = []
+                for left, right in zip(left_ranges, right_ranges):
+                    if left is not None and right is not None:
+                        interpolated.append((1.0 - ratio) * left + ratio * right)
+                    else:
+                        interpolated.append(left if left is not None else right)
+                ranges_m = tuple(interpolated)
+        self._publish_ranges(ranges_m, active=True)
 
 
 def main(args=None) -> None:

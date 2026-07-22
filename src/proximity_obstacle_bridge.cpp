@@ -30,10 +30,7 @@ namespace rb10_rmpflow_rviz
 namespace
 {
 
-constexpr int kPatchMarkerIdBase = 10000;
-constexpr int kPatchMarkerIdStride = 100;
 constexpr int kMaxPatchMarkerCount = 49;
-constexpr int kFixedSurfaceCollisionMarkerIdBase = 200000;
 constexpr double kPi = 3.14159265358979323846;
 constexpr const char * kElbowIgnoreSensorFrame = "tof3_1_W";
 constexpr std::size_t kElbowJointIndex = 2;
@@ -79,17 +76,15 @@ public:
     declare_parameter("publish_collision_obstacles", true);
     declare_parameter("obstacle_radius", 0.05);
     declare_parameter("obstacle_radii", std::vector<double>{});
-    declare_parameter("surface_patch_enabled", false);
+    declare_parameter("obstacle_marker_lifetime", 0.25);
     declare_parameter("surface_patch_rows", 5);
     declare_parameter("surface_patch_cols", 5);
     declare_parameter("surface_patch_spacing", 0.03);
     declare_parameter("surface_patch_sphere_radius", 0.03);
-    declare_parameter("surface_patch_marker_lifetime", 0.25);
     declare_parameter("surface_patch_fixed_visualization", false);
     declare_parameter("surface_patch_visualization_topic", "proximity_surface_patches");
     declare_parameter("surface_patch_memory_distance", 0.025);
     declare_parameter("surface_patch_memory_max_markers", 1200);
-    declare_parameter("surface_patch_collision_memory_enabled", false);
     declare_parameter("valid_margin", 1e-3);
     declare_parameter("range_scale", 0.001);
     declare_parameter("minimum_hold_distance", 0.05);
@@ -114,7 +109,8 @@ public:
     visualization_publish_rate_ =
       std::max(get_parameter("visualization_publish_rate").as_double(), 0.0);
     obstacle_radius_ = get_parameter("obstacle_radius").as_double();
-    surface_patch_enabled_ = get_parameter("surface_patch_enabled").as_bool();
+    obstacle_marker_lifetime_ =
+      std::max(get_parameter("obstacle_marker_lifetime").as_double(), 0.0);
     surface_patch_rows_ = static_cast<int>(std::clamp(
         get_parameter("surface_patch_rows").as_int(), static_cast<int64_t>(1), static_cast<int64_t>(7)));
     surface_patch_cols_ = static_cast<int>(std::clamp(
@@ -122,8 +118,6 @@ public:
     surface_patch_spacing_ = std::max(get_parameter("surface_patch_spacing").as_double(), 0.0);
     surface_patch_sphere_radius_ =
       std::max(get_parameter("surface_patch_sphere_radius").as_double(), 0.0);
-    surface_patch_marker_lifetime_ =
-      std::max(get_parameter("surface_patch_marker_lifetime").as_double(), 0.0);
     surface_patch_fixed_visualization_ =
       get_parameter("surface_patch_fixed_visualization").as_bool();
     surface_patch_memory_distance_ =
@@ -133,8 +127,6 @@ public:
         get_parameter("surface_patch_memory_max_markers").as_int(),
         0));
     fixed_surface_patches_.reserve(surface_patch_memory_max_markers_);
-    surface_patch_collision_memory_enabled_ =
-      get_parameter("surface_patch_collision_memory_enabled").as_bool();
     valid_margin_ = get_parameter("valid_margin").as_double();
     range_scale_ = get_parameter("range_scale").as_double();
     minimum_hold_distance_ = std::max(
@@ -262,13 +254,8 @@ private:
     visualization_msgs::msg::MarkerArray msg;
     const auto stamp = now();
     const bool ignore_tof3_1_w_this_cycle = should_ignore_tof3_1_w(stamp);
-    if (
-      ignore_tof3_1_w_this_cycle &&
-      elbow_tof3_1_w_ignore_clear_memory_ &&
-      erase_fixed_surface_patches_for_sensor(kElbowIgnoreSensorFrame) &&
-      publish_collision_this_cycle)
-    {
-      append_delete_all_marker(msg, stamp);
+    if (ignore_tof3_1_w_this_cycle && elbow_tof3_1_w_ignore_clear_memory_) {
+      erase_fixed_surface_patches_for_sensor(kElbowIgnoreSensorFrame);
     }
 
     for (std::size_t index = 0; index < latest_ranges_.size(); ++index) {
@@ -315,7 +302,7 @@ private:
         continue;
       }
 
-      if (surface_patch_fixed_visualization_ || surface_patch_collision_memory_enabled_) {
+      if (surface_patch_fixed_visualization_) {
         SurfacePatchCenters surface_centers;
         const int surface_patch_count = make_surface_patch_centers(
           index,
@@ -333,45 +320,25 @@ private:
 
       const double obstacle_radius = obstacle_radii_[index];
       const Eigen::Vector3d direction = sensor_transform->second * Eigen::Vector3d::UnitX();
-      if (surface_patch_enabled_) {
-        SurfacePatchCenters patch_centers;
-        const int patch_count = make_surface_patch_centers(
-          index,
-          sensor_transform->first,
-          sensor_transform->second,
-          range_m,
-          surface_patch_radius(index),
-          patch_centers);
-        append_surface_patch_markers(
-          msg,
-          index,
-          stamp,
-          patch_centers,
-          patch_count);
-      } else {
-        const Eigen::Vector3d center =
-          sensor_transform->first + direction * (range_m + obstacle_radius);
+      const Eigen::Vector3d center =
+        sensor_transform->first + direction * (range_m + obstacle_radius);
 
-        marker.action = visualization_msgs::msg::Marker::ADD;
-        marker.pose.position.x = center.x();
-        marker.pose.position.y = center.y();
-        marker.pose.position.z = center.z();
-        marker.pose.orientation.w = 1.0;
-        marker.scale.x = obstacle_radius * 2.0;
-        marker.scale.y = obstacle_radius * 2.0;
-        marker.scale.z = obstacle_radius * 2.0;
-        marker.color.r = 1.0F;
-        marker.color.g = 0.8F;
-        marker.color.b = 0.1F;
-        marker.color.a = 0.85F;
-        set_marker_lifetime(marker);
-        msg.markers.push_back(marker);
-      }
+      marker.action = visualization_msgs::msg::Marker::ADD;
+      marker.pose.position.x = center.x();
+      marker.pose.position.y = center.y();
+      marker.pose.position.z = center.z();
+      marker.pose.orientation.w = 1.0;
+      marker.scale.x = obstacle_radius * 2.0;
+      marker.scale.y = obstacle_radius * 2.0;
+      marker.scale.z = obstacle_radius * 2.0;
+      marker.color.r = 1.0F;
+      marker.color.g = 0.8F;
+      marker.color.b = 0.1F;
+      marker.color.a = 0.85F;
+      set_marker_lifetime(marker);
+      msg.markers.push_back(marker);
     }
 
-    if (publish_collision_this_cycle && surface_patch_collision_memory_enabled_) {
-      append_fixed_surface_collision_markers(msg, stamp);
-    }
     const bool publish_visualization_this_cycle = should_publish_visualization();
     if (publish_collision_this_cycle && obstacle_pub_) {
       obstacle_pub_->publish(msg);
@@ -501,21 +468,14 @@ private:
     }
   }
 
-  static int patch_marker_id(std::size_t sensor_index, int patch_index)
-  {
-    return kPatchMarkerIdBase +
-           static_cast<int>(sensor_index) * kPatchMarkerIdStride +
-           patch_index;
-  }
-
   void set_marker_lifetime(visualization_msgs::msg::Marker & marker) const
   {
-    if (surface_patch_marker_lifetime_ <= 0.0) {
+    if (obstacle_marker_lifetime_ <= 0.0) {
       return;
     }
-    const auto sec = static_cast<int32_t>(std::floor(surface_patch_marker_lifetime_));
+    const auto sec = static_cast<int32_t>(std::floor(obstacle_marker_lifetime_));
     const auto nanosec = static_cast<uint32_t>(
-      std::round((surface_patch_marker_lifetime_ - static_cast<double>(sec)) * 1e9));
+      std::round((obstacle_marker_lifetime_ - static_cast<double>(sec)) * 1e9));
     marker.lifetime.sec = sec;
     marker.lifetime.nanosec = nanosec;
   }
@@ -545,24 +505,6 @@ private:
         sensor_index,
         static_cast<int>(sensor_index),
         stamp));
-    for (int patch_index = 0; patch_index < kMaxPatchMarkerCount; ++patch_index) {
-      msg.markers.push_back(make_delete_marker(
-          sensor_index,
-          patch_marker_id(sensor_index, patch_index),
-          stamp));
-    }
-  }
-
-  void append_delete_all_marker(
-    visualization_msgs::msg::MarkerArray & msg,
-    const rclcpp::Time & stamp) const
-  {
-    visualization_msgs::msg::Marker marker;
-    marker.header.frame_id = fixed_frame_;
-    marker.header.stamp = stamp;
-    marker.ns = "proximity_obstacles";
-    marker.action = visualization_msgs::msg::Marker::DELETEALL;
-    msg.markers.push_back(marker);
   }
 
   double surface_patch_radius(std::size_t sensor_index) const
@@ -609,54 +551,6 @@ private:
     return patch_index;
   }
 
-  void append_surface_patch_markers(
-    visualization_msgs::msg::MarkerArray & msg,
-    std::size_t sensor_index,
-    const rclcpp::Time & stamp,
-    const SurfacePatchCenters & centers,
-    int patch_count) const
-  {
-    msg.markers.push_back(make_delete_marker(
-        sensor_index,
-        static_cast<int>(sensor_index),
-        stamp));
-
-    const double sphere_radius = surface_patch_radius(sensor_index);
-
-    int patch_index = 0;
-    for (; patch_index < patch_count; ++patch_index) {
-      const Eigen::Vector3d & center = centers[patch_index];
-      visualization_msgs::msg::Marker marker;
-      marker.header.frame_id = fixed_frame_;
-      marker.header.stamp = stamp;
-      marker.ns = "proximity_obstacles";
-      marker.id = patch_marker_id(sensor_index, patch_index);
-      marker.type = visualization_msgs::msg::Marker::SPHERE;
-      marker.text = sensor_frames_[sensor_index];
-      marker.action = visualization_msgs::msg::Marker::ADD;
-      marker.pose.position.x = center.x();
-      marker.pose.position.y = center.y();
-      marker.pose.position.z = center.z();
-      marker.pose.orientation.w = 1.0;
-      marker.scale.x = sphere_radius * 2.0;
-      marker.scale.y = sphere_radius * 2.0;
-      marker.scale.z = sphere_radius * 2.0;
-      marker.color.r = 1.0F;
-      marker.color.g = 0.55F;
-      marker.color.b = 0.05F;
-      marker.color.a = 0.72F;
-      set_marker_lifetime(marker);
-      msg.markers.push_back(marker);
-    }
-
-    for (; patch_index < kMaxPatchMarkerCount; ++patch_index) {
-      msg.markers.push_back(make_delete_marker(
-          sensor_index,
-          patch_marker_id(sensor_index, patch_index),
-          stamp));
-    }
-  }
-
   bool fixed_surface_patch_is_new(const Eigen::Vector3d & center) const
   {
     if (surface_patch_memory_distance_ <= 0.0) {
@@ -679,8 +573,7 @@ private:
     int patch_count)
   {
     if (
-      !(surface_patch_fixed_visualization_ || surface_patch_collision_memory_enabled_) ||
-      surface_patch_memory_max_markers_ == 0 ||
+      !surface_patch_fixed_visualization_ || surface_patch_memory_max_markers_ == 0 ||
       sensor_index >= sensor_frames_.size())
     {
       return;
@@ -766,35 +659,6 @@ private:
     }
 
     surface_patch_pub_->publish(msg);
-  }
-
-  void append_fixed_surface_collision_markers(
-    visualization_msgs::msg::MarkerArray & msg,
-    const rclcpp::Time & stamp) const
-  {
-    for (std::size_t index = 0; index < fixed_surface_patches_.size(); ++index) {
-      const auto & patch = fixed_surface_patches_[index];
-      visualization_msgs::msg::Marker marker;
-      marker.header.frame_id = fixed_frame_;
-      marker.header.stamp = stamp;
-      marker.ns = "proximity_obstacles";
-      marker.id = kFixedSurfaceCollisionMarkerIdBase + static_cast<int32_t>(index);
-      marker.type = visualization_msgs::msg::Marker::SPHERE;
-      marker.text = patch.sensor_frame;
-      marker.action = visualization_msgs::msg::Marker::ADD;
-      marker.pose.position.x = patch.center.x();
-      marker.pose.position.y = patch.center.y();
-      marker.pose.position.z = patch.center.z();
-      marker.pose.orientation.w = 1.0;
-      marker.scale.x = patch.radius * 2.0;
-      marker.scale.y = patch.radius * 2.0;
-      marker.scale.z = patch.radius * 2.0;
-      marker.color.r = 0.05F;
-      marker.color.g = 0.75F;
-      marker.color.b = 1.0F;
-      marker.color.a = 0.55F;
-      msg.markers.push_back(marker);
-    }
   }
 
   bool range_topic_enabled(std::size_t index) const
@@ -943,14 +807,12 @@ private:
   bool publish_collision_obstacles_{true};
   double visualization_publish_rate_{20.0};
   double obstacle_radius_{0.05};
-  bool surface_patch_enabled_{false};
+  double obstacle_marker_lifetime_{0.25};
   int surface_patch_rows_{5};
   int surface_patch_cols_{5};
   double surface_patch_spacing_{0.03};
   double surface_patch_sphere_radius_{0.03};
-  double surface_patch_marker_lifetime_{0.25};
   bool surface_patch_fixed_visualization_{false};
-  bool surface_patch_collision_memory_enabled_{false};
   bool fixed_surface_markers_cleared_{false};
   double surface_patch_memory_distance_{0.025};
   std::size_t surface_patch_memory_max_markers_{1200};

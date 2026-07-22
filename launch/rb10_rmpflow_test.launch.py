@@ -43,10 +43,6 @@ def generate_launch_description():
     proximity_surface_visualization = LaunchConfiguration("proximity_surface_visualization")
     proximity_collision_obstacle_topic = LaunchConfiguration("proximity_collision_obstacle_topic")
     proximity_visualization_obstacle_topic = LaunchConfiguration("proximity_visualization_obstacle_topic")
-    surface_patch_enabled = LaunchConfiguration("surface_patch_enabled")
-    surface_patch_collision_memory_enabled = LaunchConfiguration(
-        "surface_patch_collision_memory_enabled"
-    )
     record_data = LaunchConfiguration("record_data")
     auto_start_recording = LaunchConfiguration("auto_start_recording")
     recording_rate = LaunchConfiguration("recording_rate")
@@ -57,17 +53,11 @@ def generate_launch_description():
     rmpflow_trace_log_rate = LaunchConfiguration("rmpflow_trace_log_rate")
     rmpflow_trace_log_directory = LaunchConfiguration("rmpflow_trace_log_directory")
     rmpflow_trace_console_summary = LaunchConfiguration("rmpflow_trace_console_summary")
-    tangent_escape_rmp_leaf_mode = LaunchConfiguration("tangent_escape_rmp_leaf_mode")
-    tangent_escape_rmp_metric_scalar = LaunchConfiguration("tangent_escape_rmp_metric_scalar")
-    tangent_escape_rmp_position_gain = LaunchConfiguration("tangent_escape_rmp_position_gain")
-    tangent_escape_rmp_escape_length = LaunchConfiguration("tangent_escape_rmp_escape_length")
-    tangent_escape_rmp_softmax_beta = LaunchConfiguration("tangent_escape_rmp_softmax_beta")
+    enable_tangent_escape_rmp = LaunchConfiguration("enable_tangent_escape_rmp")
     publish_tangent_escape_rmp_data = LaunchConfiguration("publish_tangent_escape_rmp_data")
-    publish_tangent_escape_filter_data = LaunchConfiguration("publish_tangent_escape_filter_data")
-    publish_tangent_escape_filter_candidate_data = LaunchConfiguration(
-        "publish_tangent_escape_filter_candidate_data"
+    publish_tangent_escape_dual_solve_data = LaunchConfiguration(
+        "publish_tangent_escape_dual_solve_data"
     )
-    publish_tangent_escape_filter_debug = LaunchConfiguration("publish_tangent_escape_filter_debug")
     publish_tangent_escape_geometry_debug = LaunchConfiguration("publish_tangent_escape_geometry_debug")
     servo_t1 = LaunchConfiguration("servo_t1")
     servo_t2 = LaunchConfiguration("servo_t2")
@@ -149,24 +139,9 @@ def generate_launch_description():
         "synced_input_velocity_ratio_tolerance": synced_input_velocity_ratio_tolerance,
         "use_velocity_feedback_in_solver": use_velocity_feedback_in_solver,
         "measured_velocity_feedback_blend": measured_velocity_feedback_blend,
-        "enable_tangent_escape_filter": False,
-        "enable_tangent_escape_rmp": False,
-        "tangent_escape_rmp_leaf_mode": tangent_escape_rmp_leaf_mode,
-        "tangent_escape_rmp_metric_scalar": ParameterValue(
-            tangent_escape_rmp_metric_scalar,
-            value_type=float,
-        ),
-        "tangent_escape_rmp_position_gain": ParameterValue(
-            tangent_escape_rmp_position_gain,
-            value_type=float,
-        ),
-        "tangent_escape_rmp_escape_length": ParameterValue(
-            tangent_escape_rmp_escape_length,
-            value_type=float,
-        ),
-        "tangent_escape_rmp_softmax_beta": ParameterValue(
-            tangent_escape_rmp_softmax_beta,
-            value_type=float,
+        "enable_tangent_escape_rmp": ParameterValue(
+            enable_tangent_escape_rmp,
+            value_type=bool,
         ),
         "publish_tangent_escape_rmp_data": ParameterValue(
             PythonExpression([
@@ -174,25 +149,14 @@ def generate_launch_description():
             ]),
             value_type=bool,
         ),
-        "publish_tangent_escape_filter_data": ParameterValue(
+        "publish_tangent_escape_dual_solve_data": ParameterValue(
             PythonExpression([
-                'True if "', publish_tangent_escape_filter_data, '" == "true" else False'
-            ]),
-            value_type=bool,
-        ),
-        "publish_tangent_escape_filter_candidate_data": ParameterValue(
-            PythonExpression([
-                'True if "', publish_tangent_escape_filter_candidate_data,
+                'True if "', publish_tangent_escape_dual_solve_data,
                 '" == "true" else False'
             ]),
             value_type=bool,
         ),
-        "publish_tangent_escape_filter_debug": ParameterValue(
-            PythonExpression([
-                'True if "', publish_tangent_escape_filter_debug, '" == "true" else False'
-            ]),
-            value_type=bool,
-        ),
+        "tangent_escape_dual_solve_topic": "/tangent_escape_dual_solve",
         "publish_tangent_escape_geometry_debug": ParameterValue(
             PythonExpression([
                 'True if "', publish_tangent_escape_geometry_debug, '" == "true" else False'
@@ -308,19 +272,6 @@ def generate_launch_description():
                     ]),
                     value_type=bool,
                 ),
-                "surface_patch_enabled": ParameterValue(
-                    PythonExpression([
-                        'True if "', surface_patch_enabled, '" == "true" else False'
-                    ]),
-                    value_type=bool,
-                ),
-                "surface_patch_collision_memory_enabled": ParameterValue(
-                    PythonExpression([
-                        'True if "', surface_patch_collision_memory_enabled,
-                        '" == "true" else False'
-                    ]),
-                    value_type=bool,
-                ),
                 "obstacle_topic": proximity_collision_obstacle_topic,
                 "visualization_obstacle_topic": proximity_visualization_obstacle_topic,
             },
@@ -385,8 +336,6 @@ def generate_launch_description():
             "rmp_ee_pose_topic": "/rmp_ee_pose",
             "rmp_joint_accel_topic": "/rmp_joint_accel",
             "rmp_tcp_accel_topic": "/rmp_tcp_accel",
-            "tangent_escape_filter_data_topic": "/tangent_escape_filter_data",
-            "tangent_escape_filter_candidate_data_topic": "/tangent_escape_filter_candidates",
             "tangent_escape_rmp_data_topic": "/tangent_escape_rmp_data",
             "tangent_escape_dual_solve_topic": "/tangent_escape_dual_solve",
             "tangent_escape_geometry_data_topic": "/tangent_escape_geometry_data",
@@ -493,16 +442,6 @@ def generate_launch_description():
             description="MarkerArray topic used by proximity_obstacle_bridge for RViz obstacle markers.",
         ),
         DeclareLaunchArgument(
-            "surface_patch_enabled",
-            default_value="true",
-            description="Publish live proximity surface patch markers into /obstacles.",
-        ),
-        DeclareLaunchArgument(
-            "surface_patch_collision_memory_enabled",
-            default_value="true",
-            description="Feed remembered proximity surface patches into /obstacles.",
-        ),
-        DeclareLaunchArgument(
             "bridge_publish_rate",
             default_value="500.0",
             description="RB10 state receive/publish rate in Hz before filtering.",
@@ -568,29 +507,12 @@ def generate_launch_description():
             description="Print one-line trace summaries to the launch terminal.",
         ),
         DeclareLaunchArgument(
-            "tangent_escape_rmp_leaf_mode",
-            default_value="softmax_gds",
-            description="Tangent escape RMP leaf mode: softmax_gds, gds, or direct_accel.",
-        ),
-        DeclareLaunchArgument(
-            "tangent_escape_rmp_metric_scalar",
-            default_value="150.0",
-            description="Metric scalar for the in-tree tangent escape RMP leaf.",
-        ),
-        DeclareLaunchArgument(
-            "tangent_escape_rmp_position_gain",
-            default_value="16.0",
-            description="Stage-2 GDS scalar tangent spring gain.",
-        ),
-        DeclareLaunchArgument(
-            "tangent_escape_rmp_escape_length",
-            default_value="0.06",
-            description="Stage-2 GDS scalar tangent target displacement in meters.",
-        ),
-        DeclareLaunchArgument(
-            "tangent_escape_rmp_softmax_beta",
-            default_value="4.0",
-            description="Stage-3 softmax inverse temperature for candidate branch weights.",
+            "enable_tangent_escape_rmp",
+            default_value="false",
+            description=(
+                "Enable the canonical tangent Escape leaf in the test launch. "
+                "Default remains false."
+            ),
         ),
         DeclareLaunchArgument(
             "publish_tangent_escape_rmp_data",
@@ -598,24 +520,19 @@ def generate_launch_description():
             description="Publish tangent escape RMP diagnostics for trace logging.",
         ),
         DeclareLaunchArgument(
-            "publish_tangent_escape_filter_data",
+            "publish_tangent_escape_dual_solve_data",
             default_value="true",
-            description="Publish selected tangent escape filter sample data for trace logging.",
-        ),
-        DeclareLaunchArgument(
-            "publish_tangent_escape_filter_candidate_data",
-            default_value="true",
-            description="Publish all tangent escape filter candidate scores for trace logging.",
-        ),
-        DeclareLaunchArgument(
-            "publish_tangent_escape_filter_debug",
-            default_value="false",
-            description="Publish RViz tangent escape filter markers.",
+            description=(
+                "Publish the same-state Collision-only versus Collision-plus-Escape "
+                "post-limit acceleration comparison."
+            ),
         ),
         DeclareLaunchArgument(
             "publish_tangent_escape_geometry_debug",
-            default_value="false",
-            description="Publish Stage-0 tangent escape geometry data and RViz markers.",
+            default_value="true",
+            description=(
+                "Publish tangent escape geometry data and selected-direction RViz markers."
+            ),
         ),
         DeclareLaunchArgument(
             "record_joint_velocity",

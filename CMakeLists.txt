@@ -61,6 +61,10 @@ target_link_libraries(rb10_casadi_graph Eigen3::Eigen ${CASADI_LIBRARY})
 add_library(rb10_pinocchio_rmp
   src/pinocchio_model.cpp
   src/pinocchio_direct_solver.cpp
+  src/tangent_escape_canonical.cpp
+  src/paper_gds_collision.cpp
+  src/paper_gds_joint_limit.cpp
+  src/escape_energy_certificate.cpp
 )
 target_include_directories(rb10_pinocchio_rmp PUBLIC include)
 target_include_directories(
@@ -290,9 +294,10 @@ install(
 	    scripts/fake_proximity_scenario_v2.py
 	    scripts/check_tangent_escape_stage0_fake.py
     scripts/check_tangent_escape_closed_loop.py
-    scripts/check_tangent_escape_rmp_validation.py
-    scripts/validate_tangent_escape_stability_suite.py
-    scripts/tune_tangent_escape_rmp_fake.py
+    scripts/compare_tangent_escape_ab.py
+  scripts/analyze_rmp_leaf_ablation.py
+  scripts/compare_rmp_leaf_ablation.py
+  scripts/compare_rmp_closed_loop_smoothness.py
     scripts/rmp_goal_logger.py
     scripts/rmpflow_trace_logger.py
     scripts/rmp_goal_sequence_visualizer.py
@@ -300,14 +305,69 @@ install(
 	    scripts/experiment_goal_runner.py
 	    scripts/plot_ee_trajectory_3d.py
 	    scripts/plot_tcp_accel_direction.py
-	    scripts/plot_tangent_escape_lyapunov.py
-	    scripts/plot_tangent_escape_geometry_report.py
-	    scripts/plot_tangent_escape_filter_debug.py
-	    scripts/plot_tangent_escape_filter_report.py
+    scripts/plot_tangent_escape_geometry_report.py
+    scripts/stability_certificate_visualizer.py
 	    scripts/plot_velocity_filter_comparison.py
     scripts/plot_velocity_dataset_comparison.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  add_executable(
+    test_tangent_escape_canonical
+    test/test_tangent_escape_canonical.cpp
+  )
+  target_include_directories(test_tangent_escape_canonical PRIVATE include)
+  set_target_properties(
+    test_tangent_escape_canonical PROPERTIES
+    BUILD_RPATH "${CASADI_ROOT}/lib"
+  )
+  target_link_libraries(
+    test_tangent_escape_canonical
+    Eigen3::Eigen
+    rb10_pinocchio_rmp
+  )
+  add_test(
+    NAME tangent_escape_canonical
+    COMMAND
+      test_tangent_escape_canonical
+      "${CMAKE_CURRENT_SOURCE_DIR}/urdf/rb10_1300e.urdf"
+  )
+
+  ament_add_gtest(
+    test_paper_gds_collision
+    test/test_paper_gds_collision.cpp
+  )
+  target_include_directories(test_paper_gds_collision PRIVATE include)
+  target_link_libraries(
+    test_paper_gds_collision
+    Eigen3::Eigen
+    rb10_pinocchio_rmp
+  )
+
+  ament_add_gtest(
+    test_paper_gds_joint_limit
+    test/test_paper_gds_joint_limit.cpp
+  )
+  target_include_directories(test_paper_gds_joint_limit PRIVATE include)
+  target_link_libraries(
+    test_paper_gds_joint_limit
+    Eigen3::Eigen
+    rb10_pinocchio_rmp
+  )
+
+  ament_add_gtest(
+    test_escape_energy_certificate
+    test/test_escape_energy_certificate.cpp
+  )
+  target_include_directories(test_escape_energy_certificate PRIVATE include)
+  target_link_libraries(
+    test_escape_energy_certificate
+    Eigen3::Eigen
+    rb10_pinocchio_rmp
+  )
+endif()
 
 ament_package()

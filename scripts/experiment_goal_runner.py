@@ -13,6 +13,7 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Pose, PoseStamped
 from rclpy.node import Node
+from rclpy.utilities import remove_ros_args
 from std_msgs.msg import UInt8
 from std_srvs.srv import Trigger
 
@@ -168,6 +169,7 @@ class ExperimentGoalRunner(Node):
         rmp_active_value: int,
         goal_tolerance_m: float,
         goal_settle_sec: float,
+        timeout_sec: float = 0.0,
     ) -> Dict[str, Optional[float]]:
         if publish_rate_hz <= 0.0:
             raise RuntimeError("publish_rate_hz must be greater than 0.")
@@ -180,6 +182,8 @@ class ExperimentGoalRunner(Node):
         last_error_m: Optional[float] = None
 
         while rclpy.ok():
+            if timeout_sec > 0.0 and time.monotonic() - start_time >= timeout_sec:
+                break
             if activate_rmp:
                 self.publish_rmp_flag(rmp_active_value)
             self.publish_goal(frame_id, position, orientation)
@@ -354,6 +358,24 @@ def parse_args() -> argparse.Namespace:
         help="How long the TCP must remain inside tolerance before a goal is marked reached.",
     )
     parser.add_argument(
+        "--goal-timeout-sec",
+        type=float,
+        default=0.0,
+        help=(
+            "Maximum time per non-streamed goal. Zero preserves the original "
+            "wait-until-reached behavior."
+        ),
+    )
+    parser.add_argument(
+        "--fixed-goal-duration-sec",
+        type=float,
+        default=0.0,
+        help=(
+            "Publish every pose for exactly this duration, regardless of whether "
+            "the goal is reached. Intended for time-aligned A/B experiments."
+        ),
+    )
+    parser.add_argument(
         "--publish-rate",
         type=float,
         help="Override goal publish rate in Hz.",
@@ -507,7 +529,9 @@ def parse_args() -> argparse.Namespace:
         help="Publish zero on /RMP_flag when the runner exits.",
     )
 
-    args = parser.parse_args()
+    # launch_ros appends "--ros-args ..."; keep application arguments while
+    # allowing this runner to be started as a launch Node.
+    args = parser.parse_args(remove_ros_args(args=sys.argv)[1:])
     requested_runs = [bool(args.pose), bool(args.trajectory), bool(args.stop)]
     if sum(requested_runs) > 1:
         parser.error("Use only one of --pose, --trajectory, or --stop.")
@@ -515,6 +539,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--goal-tolerance-m must be greater than 0.")
     if args.goal_settle_sec is not None and args.goal_settle_sec < 0.0:
         parser.error("--goal-settle-sec must be non-negative.")
+    if args.goal_timeout_sec < 0.0:
+        parser.error("--goal-timeout-sec must be non-negative.")
+    if args.fixed_goal_duration_sec < 0.0:
+        parser.error("--fixed-goal-duration-sec must be non-negative.")
+    if args.stream_goal and args.fixed_goal_duration_sec > 0.0:
+        parser.error("--stream-goal and --fixed-goal-duration-sec cannot be combined.")
     if args.publish_rate is not None and args.publish_rate <= 0.0:
         parser.error("--publish-rate must be greater than 0.")
     if args.stream_steps < 0:
@@ -699,15 +729,22 @@ def resolve_trajectory(
     pose_names: List[str]
     if isinstance(entry, list):
         pose_names = [str(name) for name in entry]
+        repeat_count = 1
     elif isinstance(entry, dict):
         raw_poses = entry.get("poses", entry.get("waypoints"))
         if not isinstance(raw_poses, list) or not raw_poses:
             raise RuntimeError(f"Trajectory '{trajectory_name}' requires poses: [name, ...].")
         pose_names = [str(name) for name in raw_poses]
+        repeat_count = int(entry.get("repeat_count", entry.get("repeat", 1)))
+        if repeat_count < 1:
+            raise RuntimeError(
+                f"Trajectory '{trajectory_name}' repeat_count must be at least 1."
+            )
         wait_sec = float(entry.get("wait_sec", entry.get("wait_between_sec", 0.0)))
     else:
         raise RuntimeError(f"Trajectory '{trajectory_name}' must be a list or mapping.")
 
+    pose_names *= repeat_count
     poses = [
         resolve_pose(
             data=data,
@@ -825,7 +862,13 @@ def print_run_result(result: Dict[str, Optional[float]]) -> None:
     stream_elapsed = result.get("stream_elapsed_sec")
     if streamed_waypoints is not None and stream_elapsed is not None:
         stream_suffix = f", streamed_waypoints={streamed_waypoints:.0f}, stream_elapsed={stream_elapsed:.2f}s"
-    if result.get("reached", 0.0) >= 0.5:
+    if result.get("fixed_duration", 0.0) >= 0.5:
+        print(
+            f"Fixed goal interval complete: elapsed={elapsed:.2f}s, last_error={last_error:.4f}m"
+            if elapsed is not None and last_error is not None
+            else "Fixed goal interval complete"
+        )
+    elif result.get("reached", 0.0) >= 0.5:
         print(
             f"Reached goal: elapsed={elapsed:.2f}s, error={last_error:.4f}m{stream_suffix}"
             if elapsed is not None and last_error is not None
@@ -871,6 +914,19 @@ def run_pose(
                 stream_speed_m_s=args.stream_speed_m_s,
                 stream_orientation_mode=args.stream_orientation_mode,
             )
+        elif args.fixed_goal_duration_sec > 0.0:
+            result = node.publish_for_duration(
+                frame_id=pose["frame_id"],
+                position=pose["position"],
+                orientation=pose["orientation"],
+                duration_sec=args.fixed_goal_duration_sec,
+                publish_rate_hz=pose["publish_rate_hz"],
+                activate_rmp=args.activate_rmp,
+                rmp_active_value=args.rmp_active_value,
+                goal_tolerance_m=0.0,
+                goal_settle_sec=0.0,
+            )
+            result["fixed_duration"] = 1.0
         else:
             result = node.publish_until_reached(
                 frame_id=pose["frame_id"],
@@ -881,6 +937,7 @@ def run_pose(
                 rmp_active_value=args.rmp_active_value,
                 goal_tolerance_m=pose["goal_tolerance_m"],
                 goal_settle_sec=pose["goal_settle_sec"],
+                timeout_sec=args.goal_timeout_sec,
             )
         print_run_result(result)
 
@@ -937,6 +994,19 @@ def run_trajectory(
                     stream_speed_m_s=args.stream_speed_m_s,
                     stream_orientation_mode=args.stream_orientation_mode,
                 )
+            elif args.fixed_goal_duration_sec > 0.0:
+                result = node.publish_for_duration(
+                    frame_id=pose["frame_id"],
+                    position=pose["position"],
+                    orientation=pose["orientation"],
+                    duration_sec=args.fixed_goal_duration_sec,
+                    publish_rate_hz=pose["publish_rate_hz"],
+                    activate_rmp=args.activate_rmp,
+                    rmp_active_value=args.rmp_active_value,
+                    goal_tolerance_m=0.0,
+                    goal_settle_sec=0.0,
+                )
+                result["fixed_duration"] = 1.0
             else:
                 result = node.publish_until_reached(
                     frame_id=pose["frame_id"],
@@ -947,6 +1017,7 @@ def run_trajectory(
                     rmp_active_value=args.rmp_active_value,
                     goal_tolerance_m=pose["goal_tolerance_m"],
                     goal_settle_sec=pose["goal_settle_sec"],
+                    timeout_sec=args.goal_timeout_sec,
                 )
             print_run_result(result)
             if trajectory["wait_sec"] > 0.0 and index < len(trajectory["poses"]):

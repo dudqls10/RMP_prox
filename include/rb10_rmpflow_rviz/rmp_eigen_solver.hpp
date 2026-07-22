@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <string>
@@ -21,6 +22,7 @@ struct ObstacleSphere
   Eigen::Vector3d center{100.0, 100.0, 100.0};
   double radius{0.01};
   int proximity_control_point_index{-1};
+  std::int64_t source_id{-1};
 };
 
 struct BodyObstacle
@@ -50,6 +52,10 @@ struct CSpaceTargetParams
 
 struct JointLimitParams
 {
+  // "lula_canonical" preserves the production acceleration/metric policy.
+  // "paper_gds" uses a logit task with a constant task metric, a potential,
+  // and positive damping so that the leaf has an exact structured-GDS form.
+  std::string policy{"lula_canonical"};
   double metric_scalar{0.1};
   double metric_length_scale{0.01};
   double metric_exploder_eps{0.001};
@@ -58,6 +64,8 @@ struct JointLimitParams
   double accel_potential_gain{1.0};
   double accel_potential_exploder_eps{0.01};
   double accel_potential_exploder_length_scale{0.1};
+  double gds_center_fraction{0.5};
+  double gds_domain_epsilon{1e-9};
 };
 
 struct JointVelocityCapParams
@@ -93,7 +101,9 @@ struct AxisTargetParams
 
 struct CollisionRmpParams
 {
-  std::string policy{"repulsive"};
+  // "repulsive" and "lula_canonical" select the original production policy.
+  // "paper_gds" selects the signed-clearance structured-GDS natural policy.
+  std::string policy{"lula_canonical"};
   double margin{0.0};
   double damping_gain{50.0};
   double damping_std_dev{0.04};
@@ -105,60 +115,97 @@ struct CollisionRmpParams
   double metric_scalar{1.0};
   double metric_exploder_std_dev{0.02};
   double metric_exploder_eps{0.001};
+  double gds_clearance_smoothing{1e-4};
+  double gds_metric_velocity_floor{0.5};
+  double gds_metric_velocity_scale{0.03};
+  double gds_damping_velocity_scale{0.03};
 };
 
 struct TangentEscapeRmpParams
 {
   bool enabled{false};
-  std::string leaf_mode{"softmax_gds"};
-  double metric_scalar{150.0};
-  double normal_metric_scalar{0.0};
-  double damping_gain{4.0};
+  // "canonical_velocity" preserves the previous velocity-reference and
+  // residual-release implementation.  "risk_damped" is the active design:
+  // a distance/closing-rate drive opposed by signed tangent damping.
+  std::string acceleration_model{"canonical_velocity"};
+  double metric_scalar{50000.0};
+  // Independent numeric copy of the Collision clearance margin.  Do not read
+  // config_.collision.margin in the Escape leaf.
+  double clearance_margin{0.0};
   double safe_distance{0.08};
-  double influence_distance{0.25};
-  double tangent_gain{1.0};
-  double position_gain{16.0};
-  double escape_length{0.06};
-  double collision_accel_scale{0.001};
-  double normal_gain{0.0};
-  double escape_speed{0.05};
-  double velocity_gain{5.0};
+  double influence_distance{0.20};
+  double velocity_gain{20.0};
   double max_accel{0.6};
   double goal_block_beta_on{0.5};
   double goal_block_beta_full{0.94};
   double nominal_prediction_dt{0.01};
-  double nominal_min_speed{1e-4};
-  double tangent_bias_weight{1.0};
-  double softmax_beta{4.0};
-  int candidate_count{16};
   double candidate_lookahead{0.08};
-  double goal_weight{1.0};
-  double continuity_weight{0.5};
-  double up_weight{0.0};
-  double duplicate_risk_weight{2.0};
-  double duplicate_risk_min_alignment{0.70};
-  double adjacent_block_weight{1.0};
-  double branch_hold_weight{0.5};
+  double goal_weight{2.0};
+  double continuity_weight{0.3};
+  double sector_risk_weight{1.5};
   double min_activation{0.05};
   double min_tangent_norm{1e-4};
-  double stable_mode_normal_tolerance{0.20};
-  double goal_normal_dot_threshold{1.0};
-  bool supervisor_enabled{true};
-  double supervisor_dt{0.01};
-  double branch_hold_duration{0.6};
-  double branch_hold_max_adjacent_risk{0.9};
-  double stuck_activation_threshold{0.5};
-  double stuck_velocity_threshold{0.01};
-  double stuck_progress_threshold{0.005};
-  double stuck_time_threshold{0.6};
-  double stuck_metric_boost{1.2};
-  double stuck_accel_boost{1.05};
-  double blocked_memory_update_duration{0.8};
-  double blocked_memory_progress_threshold{0.008};
-  double blocked_memory_clearance_improvement{0.01};
+  double normal_tolerance{0.20};
+  double control_dt{0.01};
   double blocked_memory_penalty_weight{2.0};
-  double blocked_memory_decay_time{6.0};
-  double recovery_duration{0.5};
+  double prevent_weight{0.25};
+  double activation_time_constant{0.15};
+  double activation_rise_rate{4.0};
+  double activation_fall_rate{2.0};
+  double progress_filter_time_constant{0.25};
+  double progress_low_threshold{0.001};
+  double progress_ok_threshold{0.01};
+  double still_speed_threshold{0.003};
+  double moving_speed_threshold{0.02};
+  double intent_on_speed{0.005};
+  double intent_full_speed{0.03};
+  double prevent_speed{0.02};
+  double recovery_speed{0.06};
+  double max_speed{0.06};
+  double desired_velocity_time_constant{0.12};
+  double release_stop_speed{0.003};
+  double release_hold_speed{0.02};
+  double drive_ramp_duration{0.15};
+  double handoff_duration{0.15};
+  double minimum_drive_duration{0.2};
+  double release_blockage_threshold{0.03};
+  double pair_switch_margin{0.10};
+  double direction_switch_margin{0.08};
+  double goal_score_scale{0.02};
+  double sector_risk_scale{1.0};
+  double sector_risk_hard_limit{0.98};
+  double sector_risk_change_threshold{0.10};
+  double accel_jump_weight{0.20};
+  double accel_jump_scale{10.0};
+  double blocked_memory_sigma{0.35};
+  double candidate_min_displacement{1e-5};
+  int refinement_iterations{5};
+  double command_test_distance{0.01};
+  double minimum_move_ratio{0.20};
+  double goal_change_reset_distance{0.02};
+  double risk_distance_gain{0.30};
+  double risk_distance_scale{0.08};
+  double risk_approach_gain{0.50};
+  double risk_approach_distance_scale{0.08};
+  double risk_approach_epsilon{0.25};
+  double risk_velocity_gate_scale{0.03};
+  double risk_clearance_rate_filter_time_constant{0.05};
+  double risk_tangent_damping_gain{10.0};
+};
+
+struct EscapeEnergyCertificateParams
+{
+  // This guard limits the positive interconnection energy injected by Escape.
+  // With no damping credit, the sampled sum
+  //   sum(control_dt * max(P_escape[k], 0))
+  // never exceeds the initial tank energy.  This does not by itself certify
+  // a particular discrete state integrator.
+  bool enabled{false};
+  double tank_capacity{0.25};
+  double initial_energy{0.25};
+  double control_dt{0.01};
+  int scale_search_iterations{16};
+  double power_tolerance{1e-9};
 };
 
 struct DampingRmpParams
@@ -301,6 +348,9 @@ struct EigenRmpConfig
   std::array<double, 6> joint_lower_limits = RB10Model::joint_lower_limits;
   std::array<double, 6> joint_upper_limits = RB10Model::joint_upper_limits;
   std::array<double, 6> joint_limit_buffers{0.01, 0.01, 0.01, 0.01, 0.01, 0.01};
+  double max_joint_accel{20.0};
+  bool preserve_joint_accel_direction{true};
+  bool enable_leaf_ablation_diagnostics{false};
   double solve_offset{1e-3};
   std::string solve_method{"rmp2"};
   std::string rmp_type{"canonical"};
@@ -312,6 +362,7 @@ struct EigenRmpConfig
   AxisTargetParams wrist_axis_target{};
   CollisionRmpParams collision{};
   TangentEscapeRmpParams tangent_escape{};
+  EscapeEnergyCertificateParams escape_energy_certificate{};
   DampingRmpParams damping{};
   std::vector<BodyObstacle> body_obstacles;
   std::vector<RmpNodeConfig> graph_nodes{default_rmp_graph_nodes()};
@@ -323,6 +374,14 @@ struct RmpSolveResult
   Eigen::Matrix<double, 6, 6> metric{Eigen::Matrix<double, 6, 6>::Zero()};
   RB10Model::JointVector force{RB10Model::JointVector::Zero()};
   std::vector<double> tangent_escape_rmp_data{0.0};
+  // Same-state counterfactual solve used only for validation/visualization:
+  // final guarded Escape solve versus the identical root solve with the
+  // Escape rank-one metric and force removed.
+  std::vector<double> tangent_escape_dual_solve_data{0.0};
+  // Frozen-policy, same-state leaf removal solves for saturation diagnosis.
+  // This data is observational only and never feeds the commanded qdd.
+  std::vector<double> leaf_ablation_data{0.0};
+  std::vector<double> stability_certificate_data{0.0};
 };
 
 class EigenRmpSolver
@@ -366,7 +425,11 @@ public:
       qdd.setZero();
     }
 
-    return RmpSolveResult{qdd, metric, force};
+    RmpSolveResult result;
+    result.qdd = qdd;
+    result.metric = metric;
+    result.force = force;
+    return result;
   }
 
 private:

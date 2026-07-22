@@ -6,7 +6,9 @@ rmpflow_controller:
     root_solve_offset: 0.001
 
     # Collision RMP
-    collision_policy: "repulsive"
+    # lula_canonical preserves the existing production/site formula.
+    # Use paper_gds only in the dedicated stability-validation profile first.
+    collision_policy: "lula_canonical"
     collision_rmp_margin: 0.0
     # collision_rmp_damping_gain: 100.0
     collision_rmp_damping_gain: 50.0
@@ -23,6 +25,10 @@ rmpflow_controller:
     # collision_rmp_metric_exploder_eps: 0.1
     collision_rmp_metric_exploder_std_dev: 0.02
     collision_rmp_metric_exploder_eps: 0.8
+    collision_rmp_gds_clearance_smoothing: 0.0001
+    collision_rmp_gds_metric_velocity_floor: 0.5
+    collision_rmp_gds_metric_velocity_scale: 0.03
+    collision_rmp_gds_damping_velocity_scale: 0.03
     # Target RMP
 
     # vel
@@ -56,8 +62,8 @@ rmpflow_controller:
 
     # Damping RMP
     # vel
-    damping_rmp_accel_d_gain: 160.0
-    damping_rmp_metric_scalar: 500.0
+    damping_rmp_accel_d_gain: 120.0
+    damping_rmp_metric_scalar: 0.0
 
     # Position
     # damping_rmp_accel_d_gain: 80.0
@@ -73,6 +79,7 @@ rmpflow_controller:
     cspace_target_inertia: 0.0
 
     # Joint Limit RMP
+    joint_limit_policy: "lula_canonical"
     joint_limit_metric_scalar: 1000.0
     joint_limit_metric_length_scale: 0.1
     joint_limit_metric_exploder_eps: 0.001
@@ -81,6 +88,8 @@ rmpflow_controller:
     joint_limit_accel_potential_gain: 100.0
     joint_limit_accel_potential_exploder_eps: 0.001
     joint_limit_accel_potential_exploder_length_scale: 0.01
+    joint_limit_gds_center_fraction: 0.5
+    joint_limit_gds_domain_epsilon: 0.000000001
 
     # Joint Velocity Cap RMP
     joint_velocity_cap_max_velocity: 1.0
@@ -90,6 +99,7 @@ rmpflow_controller:
 
     # Command limits
     max_joint_accel: 10.0
+    preserve_joint_accel_direction: true
     # max_joint_accel: 1.5
     command_guard_max_velocity_rad_s: 1.0
     # command_guard_max_velocity_rad_s: 0.5
@@ -128,86 +138,116 @@ rmpflow_controller:
     tcp_accel_marker_norm_for_max_length: 2.0
     tcp_accel_marker_min_norm: 0.001
 
-    # Stage-3 Tangent Escape RMP leaf.
-    # Default mode is multi-candidate softmax GDS. Stage-2 single-branch GDS is
-    # still available with gds, and Stage-1 direct acceleration with direct_accel.
+    # Score-supervised rank-one tangent canonical RMP.
+    # risk_damped is the active design.  canonical_velocity remains compiled
+    # only for controlled A/B rollback and is not selected by this profile.
     enable_tangent_escape_rmp: false
-    tangent_escape_rmp_leaf_mode: "softmax_gds"
-    tangent_escape_rmp_metric_scalar: 0.0
-    tangent_escape_rmp_normal_metric_scalar: 0.0
-    tangent_escape_rmp_damping_gain: 4.0
-    tangent_escape_rmp_tangent_gain: 1.0
-    tangent_escape_rmp_position_gain: 16.0
-    tangent_escape_rmp_escape_length: 0.06
-    # Multiplies the Collision RMP scalar acceleration in collision_scaled mode.
-    tangent_escape_rmp_collision_accel_scale: 0.001
-    tangent_escape_rmp_escape_speed: 0.05
+    tangent_escape_rmp_acceleration_model: "risk_damped"
+    # Independent numeric values. The Escape metric is intentionally lower
+    # than Collision's 100000.0 after the visual tuning run. The clearance
+    # margin remains the same numeric 0.0 m, but neither value is linked to
+    # Collision parameters at runtime.
+    tangent_escape_rmp_metric_scalar: 50000.0
+    tangent_escape_rmp_clearance_margin: 0.0
+    # In risk_damped mode its effective rank-one metric is m_t * lambda * B.
+    # canonical_velocity-only compatibility gain (unused by risk_damped).
     tangent_escape_rmp_velocity_gain: 20.0
+    # This is a Cartesian tangent-task limit (m/s^2). The resolved joint
+    # acceleration still follows the independent global max_joint_accel limit.
     tangent_escape_rmp_max_accel: 0.6
     tangent_escape_rmp_goal_block_beta_on: 0.5
     tangent_escape_rmp_goal_block_beta_full: 0.94
     tangent_escape_rmp_nominal_prediction_dt: 0.01
-    tangent_escape_rmp_nominal_min_speed: 0.0001
-    tangent_escape_rmp_tangent_bias_weight: 1.0
-    tangent_escape_rmp_softmax_beta: 4.0
-    tangent_escape_rmp_supervisor_enabled: false
-    tangent_escape_rmp_supervisor_dt: 0.01
-    tangent_escape_rmp_branch_hold_duration: 0.6
-    tangent_escape_rmp_branch_hold_max_adjacent_risk: 0.9
-    tangent_escape_rmp_stable_mode_normal_tolerance: 0.20
-    tangent_escape_rmp_stuck_activation_threshold: 0.5
-    tangent_escape_rmp_stuck_velocity_threshold: 0.01
-    tangent_escape_rmp_stuck_progress_threshold: 0.005
-    tangent_escape_rmp_stuck_time_threshold: 0.6
-    tangent_escape_rmp_stuck_metric_boost: 1.2
-    tangent_escape_rmp_stuck_accel_boost: 1.05
-    tangent_escape_rmp_blocked_memory_update_duration: 0.8
-    tangent_escape_rmp_blocked_memory_progress_threshold: 0.008
-    tangent_escape_rmp_blocked_memory_clearance_improvement: 0.01
+    tangent_escape_rmp_normal_tolerance: 0.20
+
+    # Active risk-damped acceleration:
+    #   a_risk = k_p exp(-d+/sigma_p)
+    #          + g_v(dot_d) k_v max(0,-dot_d)/(d+/sigma_v+eps)
+    #   a_y = sat(a_risk - b_t v_t),  m_y = m_t lambda B.
+    # Only the clearance derivative is filtered; B is never filtered.
+    tangent_escape_rmp_risk_distance_gain: 0.30
+    tangent_escape_rmp_risk_distance_scale: 0.08
+    tangent_escape_rmp_risk_approach_gain: 0.50
+    tangent_escape_rmp_risk_approach_distance_scale: 0.08
+    tangent_escape_rmp_risk_approach_epsilon: 0.25
+    tangent_escape_rmp_risk_velocity_gate_scale: 0.03
+    tangent_escape_rmp_risk_clearance_rate_filter_time_constant: 0.05
+    tangent_escape_rmp_risk_tangent_damping_gain: 10.0
+
+    # Compatibility/shared supervisor block. risk_damped ignores the old z-LPF,
+    # desired-velocity, drive-ramp, and RELEASE parameters, while it still uses
+    # intent, scoring, latch/handoff, max_speed, and failure-monitor settings.
+    # The ignored values remain parsed only so canonical_velocity can be used
+    # for an explicit rollback/A-B run; it is not selected by this profile.
+    tangent_escape_rmp_prevent_weight: 0.5
+    tangent_escape_rmp_activation_time_constant: 0.15
+    tangent_escape_rmp_activation_rise_rate: 4.0
+    tangent_escape_rmp_activation_fall_rate: 2.0
+    tangent_escape_rmp_progress_filter_time_constant: 0.25
+    tangent_escape_rmp_progress_low_threshold: 0.001
+    tangent_escape_rmp_progress_ok_threshold: 0.02
+    tangent_escape_rmp_still_speed_threshold: 0.01
+    tangent_escape_rmp_moving_speed_threshold: 0.08
+    # Ignore nominal directions below intent_on_speed. Between on/full,
+    # smoothly raise the confidence that the base RMP intends to move this CP.
+    tangent_escape_rmp_intent_on_speed: 0.005
+    tangent_escape_rmp_intent_full_speed: 0.03
+    tangent_escape_rmp_prevent_speed: 0.018
+    tangent_escape_rmp_recovery_speed: 0.05
+    tangent_escape_rmp_max_speed: 0.05
+    tangent_escape_rmp_desired_velocity_time_constant: 0.22
+    tangent_escape_rmp_release_stop_speed: 0.01
+    tangent_escape_rmp_release_hold_speed: 0.06
+    tangent_escape_rmp_drive_ramp_duration: 0.25
+    tangent_escape_rmp_handoff_duration: 0.25
+    tangent_escape_rmp_minimum_drive_duration: 0.8
+    tangent_escape_rmp_release_blockage_threshold: 0.03
+    tangent_escape_rmp_pair_switch_margin: 0.10
+    tangent_escape_rmp_direction_switch_margin: 0.08
+    tangent_escape_rmp_goal_score_scale: 0.02
+    tangent_escape_rmp_sector_risk_scale: 1.0
+    tangent_escape_rmp_sector_risk_hard_limit: 0.98
+    tangent_escape_rmp_sector_risk_change_threshold: 0.10
+    tangent_escape_rmp_accel_jump_weight: 0.20
+    tangent_escape_rmp_accel_jump_scale: 10.0
+    tangent_escape_rmp_blocked_memory_sigma: 0.35
     tangent_escape_rmp_blocked_memory_penalty_weight: 2.0
-    tangent_escape_rmp_blocked_memory_decay_time: 6.0
-    tangent_escape_rmp_recovery_duration: 0.5
+    tangent_escape_rmp_candidate_min_displacement: 0.00001
+    tangent_escape_rmp_refinement_iterations: 5
+    tangent_escape_rmp_command_test_distance: 0.002
+    tangent_escape_rmp_minimum_move_ratio: 0.30
+    tangent_escape_rmp_goal_change_reset_distance: 0.02
+
     publish_tangent_escape_rmp_data: false
     tangent_escape_rmp_data_topic: "/tangent_escape_rmp_data"
+    publish_tangent_escape_dual_solve_data: false
+    tangent_escape_dual_solve_topic: "/tangent_escape_dual_solve"
+    publish_leaf_ablation_data: false
+    leaf_ablation_topic: "/rmp_leaf_ablation"
 
-    # Tangent escape shared activation and candidate selection
-    # These still use historical tangent_escape_filter_* names, but they
-    # configure the candidate/activation path used by the tangent RMP leaf too.
-    tangent_escape_filter_safe_distance: 0.08
-    tangent_escape_filter_influence_distance: 0.20
-    tangent_escape_filter_candidate_count: 16
-    tangent_escape_filter_candidate_lookahead: 0.08
-    tangent_escape_filter_goal_weight: 1.0
-    tangent_escape_filter_continuity_weight: 0.5
-    tangent_escape_filter_up_weight: 0.0
-    tangent_escape_filter_duplicate_risk_weight: 2.0
-    tangent_escape_filter_duplicate_risk_min_alignment: 0.70
-    tangent_escape_filter_direction_switch_margin: 0.08
-    tangent_escape_filter_adjacent_block_weight: 1.0
-    tangent_escape_filter_branch_hold_weight: 0.5
-    tangent_escape_filter_min_activation: 0.05
-    tangent_escape_filter_min_tangent_norm: 0.0001
+    # Tangent escape activation and candidate selection.
+    tangent_escape_rmp_safe_distance: 0.08
+    tangent_escape_rmp_influence_distance: 0.24
+    tangent_escape_rmp_candidate_lookahead: 0.08
+    tangent_escape_rmp_goal_weight: 2.0
+    tangent_escape_rmp_continuity_weight: 0.3
+    tangent_escape_rmp_sector_risk_weight: 1.5
+    tangent_escape_rmp_min_activation: 0.05
+    tangent_escape_rmp_min_tangent_norm: 0.0001
 
-    # Tangent escape post-solve filter
-    # Directly modifies qdd after the RMP solve. Keep disabled when using the
-    # tangent escape RMP leaf as the primary implementation.
-    enable_tangent_escape_filter: false
-    tangent_escape_filter_tangent_gain: 10.0
-    tangent_escape_filter_normal_gain: 0.0
-    tangent_escape_filter_damping: 0.02
-    tangent_escape_filter_max_delta_qdd: 4.0
-    tangent_escape_filter_max_delta_qdd_rate: 40.0
-    tangent_escape_filter_release_delta_qdd_rate: 30.0
-    tangent_escape_filter_goal_normal_dot_threshold: 1.0
+    # Escape/base stability certificate. Disabled in the normal production
+    # profile; the dedicated proof launch enables the finite-energy guard.
+    escape_stability_guard_enabled: false
+    # The tank always starts full, so this is both capacity and initial energy.
+    # Placeholder only. During gain calibration, override this with a large
+    # simulation-only budget so scale remains 1; after successful Escape runs,
+    # replace it with the measured mission requirement plus a validated margin.
+    escape_stability_tank_capacity: 0.25
+    escape_stability_scale_search_iterations: 16
+    escape_stability_power_tolerance: 0.000000001
+    publish_stability_certificate_data: false
+    stability_certificate_data_topic: "/rmp_stability_certificate"
 
-    # Tangent escape filter debug output
-    publish_tangent_escape_filter_debug: false
-    tangent_escape_filter_marker_topic: "tangent_escape_filter_markers"
-    tangent_escape_filter_marker_length: 0.12
-    publish_tangent_escape_filter_data: true
-    tangent_escape_filter_data_topic: "/tangent_escape_filter_data"
-    publish_tangent_escape_filter_candidate_data: true
-    tangent_escape_filter_candidate_data_topic: "/tangent_escape_filter_candidates"
     publish_tangent_escape_geometry_debug: false
     tangent_escape_geometry_data_topic: "/tangent_escape_geometry_data"
     tangent_escape_geometry_marker_topic: "tangent_escape_geometry_markers"
@@ -221,8 +261,8 @@ rmpflow_controller:
     workspace_floor_z: 0.0
     min_link6_z: 0.03
     min_tcp_z: 0.05
-    initial_q: [1.0660471071181365, -0.3311238656883642, -1.7919295430225781, 0.8574628082122941, -1.557060585581701, 0.15151203236562774]
-    default_q: [1.0660471071181365, -0.3311238656883642, -1.7919295430225781, 0.8574628082122941, -1.557060585581701, 0.15151203236562774]
+    initial_q: [0.624269511868643, -0.42053732097686486, -1.6277205440557674, 0.749218624408137, -1.429386695978297, 0.5760347969017805]
+    default_q: [0.624269511868643, -0.42053732097686486, -1.6277205440557674, 0.749218624408137, -1.429386695978297, 0.5760347969017805]
     joint_lower_limits_deg: [-211.68, -70.0, -150.0, -80.0, -180.0, -360.0]
     joint_upper_limits_deg: [211.68, 70.0, -50.0, 80.0, 120.0, 360.0]
     joint_limit_buffers: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
@@ -635,7 +675,7 @@ interactive_goal:
     initial_x: 0.6
     initial_y: -0.4
     initial_z: 0.6
-    initial_q: [1.0660471071181365, -0.3311238656883642, -1.7919295430225781, 0.8574628082122941, -1.557060585581701, 0.15151203236562774]
+    initial_q: [0.624269511868643, -0.42053732097686486, -1.6277205440557674, 0.749218624408137, -1.429386695978297, 0.5760347969017805]
     initialize_from_joint_state: true
     joint_state_topic: "joint_states"
 
@@ -644,7 +684,7 @@ obstacle_manager:
     num_obstacles: 1
     default_radius: 0.06
     default_height: 0.8
-    default_positions: [-0.015865802764892578, -0.414907306432724, 0.4573509991168976]
+    default_positions: [-0.13920757174491882, -0.5425602197647095, 0.4573509991168976]
 
 proximity_obstacle_bridge:
   ros__parameters:
@@ -655,21 +695,17 @@ proximity_obstacle_bridge:
     visualization_publish_rate: 20.0
     publish_collision_obstacles: true
     obstacle_radius: 0.08
-    # Create measured local surface patches from valid ToF hit points.
-    surface_patch_enabled: true
+    obstacle_marker_lifetime: 0.25
+    # RViz-only memory of measured surface hit points. This is not collision input.
     surface_patch_rows: 5
     surface_patch_cols: 5
     surface_patch_spacing: 0.03
     surface_patch_sphere_radius: 0.03
-    surface_patch_marker_lifetime: 0.25
-    # RViz-only memory of measured surface hit points. This is not fed back as collision input.
     # Surface hit point center: p_sensor + R_sensor * +X * range.
     surface_patch_fixed_visualization: true
     surface_patch_visualization_topic: "proximity_surface_patches"
     surface_patch_memory_distance: 0.025
     surface_patch_memory_max_markers: 1200
-    # Also feed the remembered sensor surface hits into /obstacles for collision RMP input.
-    surface_patch_collision_memory_enabled: true
     valid_margin: 0.001
     range_scale: 0.001
     minimum_hold_distance: 0.05

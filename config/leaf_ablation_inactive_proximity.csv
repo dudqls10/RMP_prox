@@ -1,0 +1,5 @@
+# scenario,leaf_ablation_no_obstacle
+# range_unit,meters
+timestamp_unix,proximity_distance1,proximity_distance2,proximity_distance3,proximity_distance4,proximity_distance5,proximity_distance6,proximity_distance7,proximity_distance8,proximity_distance9,proximity_distance10,proximity_distance11,proximity_distance12,proximity_distance13,proximity_distance14,proximity_distance15,proximity_distance16,proximity_distance17,proximity_distance18,proximity_distance19,proximity_distance20
+0.0,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9
+12.0,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9

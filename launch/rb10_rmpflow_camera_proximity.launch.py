@@ -38,8 +38,6 @@ def generate_launch_description():
             "use_obstacles": "false",
             "use_proximity_bridge": "true",
             "proximity_surface_visualization": "false",
-            "surface_patch_enabled": "false",
-            "surface_patch_collision_memory_enabled": "false",
             "proximity_collision_obstacle_topic": proximity_raw_obstacle_topic,
             "proximity_visualization_obstacle_topic": camera_rviz_output_topic,
             "rviz_config": camera_rviz_config_path,

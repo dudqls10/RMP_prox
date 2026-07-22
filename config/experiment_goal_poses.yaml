@@ -115,7 +115,45 @@ poses:
     - 0.02881344197573989
     - 0.05937928651909098
     - 0.766479003815118
+  escape_tuning_initial:
+    position:
+    - -0.6297202110290527
+    - -0.6675255298614502
+    - 0.4152124524116516
+    orientation:
+    - 0.5848327218226111
+    - -0.09197040551552763
+    - -0.1521625502962952
+    - 0.7914282597192199
+  escape_tuning_goal:
+    position:
+    - 0.5347335338592529
+    - -0.6670728921890259
+    - 0.5349549651145935
+    orientation:
+    - 0.5848327218226111
+    - -0.09197040551552763
+    - -0.1521625502962952
+    - 0.7914282597192199
 trajectories:
+  escape_tuning_round_trip:
+    poses:
+    - escape_tuning_initial
+    - escape_tuning_goal
+    - escape_tuning_initial
+    wait_sec: 1.0
+  escape_tuning_validation:
+    poses:
+    - escape_tuning_initial
+    - escape_tuning_goal
+    repeat_count: 3
+    wait_sec: 1.0
+  escape_tuning_repeat:
+    poses:
+    - escape_tuning_initial
+    - escape_tuning_goal
+    repeat_count: 10
+    wait_sec: 1.0
   baseline_sequence:
     poses:
     - t1

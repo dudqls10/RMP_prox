@@ -41,7 +41,9 @@ def generate_launch_description():
             "start_delay_s": ParameterValue(
                 LaunchConfiguration("start_delay_s"), value_type=float
             ),
+            "start_trigger_topic": LaunchConfiguration("start_trigger_topic"),
             "loop": _bool_config("loop"),
+            "interpolate_ranges": _bool_config("interpolate_ranges"),
             "inactive_range_m": ParameterValue(
                 LaunchConfiguration("inactive_range_m"), value_type=float
             ),
@@ -69,7 +71,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "distance_column_prefix",
             default_value="proximity_distance",
-            description="Prefix for numbered distance columns 1..20.",
+            description=(
+                "Prefix for numbered distance columns 1..20, or a template "
+                "containing {index}."
+            ),
         ),
         DeclareLaunchArgument(
             "input_unit",
@@ -89,7 +94,20 @@ def generate_launch_description():
             description="0 replays from start_offset_s to the end of the CSV.",
         ),
         DeclareLaunchArgument("start_delay_s", default_value="1.0"),
+        DeclareLaunchArgument(
+            "start_trigger_topic",
+            default_value="",
+            description=(
+                "Optional PoseStamped topic. When set, replay time starts on its "
+                "first message and start_delay_s is measured from that trigger."
+            ),
+        ),
         DeclareLaunchArgument("loop", default_value="false"),
+        DeclareLaunchArgument(
+            "interpolate_ranges",
+            default_value="false",
+            description="Linearly interpolate physical ranges between CSV rows.",
+        ),
         DeclareLaunchArgument("inactive_range_m", default_value="0.90"),
         DeclareLaunchArgument("minimum_valid_range_m", default_value="0.001"),
         DeclareLaunchArgument("maximum_valid_range_m", default_value="10.0"),

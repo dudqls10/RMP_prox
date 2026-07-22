@@ -156,7 +156,7 @@ The active graph also includes:
 - a configuration-space target RMP, which weakly biases the robot toward the default joint posture;
 - a joint damping RMP, which suppresses high joint velocities.
 
-Tangent-escape RMP and tangent-escape filter modules are available in the software stack, but both are disabled in the reported experimental configuration (`enable_tangent_escape_rmp: false`, `enable_tangent_escape_filter: false`) and are therefore not part of the active controller analyzed here.
+The tangent-escape RMP is available in the software stack, but it is disabled in the reported experimental configuration (`enable_tangent_escape_rmp: false`) and is therefore not part of the active controller analyzed here.
 
 ## E. Real-Time Command Generation
 
@@ -191,8 +191,6 @@ ros2 launch rb10_rmpflow_rviz rb10_rmpflow.launch.py \
   cb_simulation:=false \
   use_proximity_bridge:=true \
   proximity_surface_visualization:=false \
-  surface_patch_enabled:=false \
-  surface_patch_collision_memory_enabled:=false \
   use_interactive_goal:=false
 ```
 

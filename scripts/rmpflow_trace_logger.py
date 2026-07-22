@@ -61,6 +61,23 @@ SENSOR_PARENT_LINKS = [
     "link2",
 ]
 
+LEAF_ABLATION_GROUPS = {
+    1: "cspace_target",
+    2: "joint_limits",
+    3: "joint_velocity_cap",
+    4: "target",
+    5: "collision",
+    6: "tangent_escape",
+    7: "damping",
+    8: "body_target",
+    9: "axis_target_x",
+    10: "axis_target_y",
+    11: "axis_target_z",
+    12: "wrist_axis_target",
+    13: "external",
+    99: "other",
+}
+
 
 @dataclass
 class StampedValue:
@@ -107,14 +124,14 @@ class RmpflowTraceLogger(Node):
         self.declare_parameter("rmp_ee_pose_topic", "/rmp_ee_pose")
         self.declare_parameter("rmp_joint_accel_topic", "/rmp_joint_accel")
         self.declare_parameter("rmp_tcp_accel_topic", "/rmp_tcp_accel")
-        self.declare_parameter("tangent_escape_filter_data_topic", "/tangent_escape_filter_data")
-        self.declare_parameter(
-            "tangent_escape_filter_candidate_data_topic",
-            "/tangent_escape_filter_candidates",
-        )
         self.declare_parameter("tangent_escape_rmp_data_topic", "/tangent_escape_rmp_data")
         self.declare_parameter("tangent_escape_dual_solve_topic", "/tangent_escape_dual_solve")
+        self.declare_parameter("leaf_ablation_topic", "/rmp_leaf_ablation")
         self.declare_parameter("tangent_escape_geometry_data_topic", "/tangent_escape_geometry_data")
+        self.declare_parameter(
+            "stability_certificate_data_topic",
+            "/rmp_stability_certificate",
+        )
         self.declare_parameter("obstacle_marker_topic", "/obstacles")
         self.declare_parameter("repulsion_metric_marker_topic", "/repulsion_metric_markers")
         self.declare_parameter("tcp_accel_marker_topic", "/tcp_accel_marker")
@@ -153,10 +170,6 @@ class RmpflowTraceLogger(Node):
         self.active_obstacle_markers: Dict[Tuple[str, int], Marker] = {}
         self.repulsion_metric_markers: Dict[Tuple[str, int], Marker] = {}
         self.tcp_accel_marker: Optional[StampedValue] = None
-        self.previous_tangent_escape_cp_index: Optional[int] = None
-        self.previous_tangent_escape_direction: Optional[List[float]] = None
-        self.last_tangent_escape_candidate_stamp_s: Optional[float] = None
-
         self.csv_file = None
         self.csv_writer = None
         self.csv_path = ""
@@ -255,18 +268,6 @@ class RmpflowTraceLogger(Node):
         )
         self.create_subscription(
             Float64MultiArray,
-            str(self.get_parameter("tangent_escape_filter_data_topic").value),
-            lambda msg: self._store("tangent_escape_filter_data", list(msg.data)),
-            10,
-        )
-        self.create_subscription(
-            Float64MultiArray,
-            str(self.get_parameter("tangent_escape_filter_candidate_data_topic").value),
-            lambda msg: self._store("tangent_escape_filter_candidate_data", list(msg.data)),
-            10,
-        )
-        self.create_subscription(
-            Float64MultiArray,
             str(self.get_parameter("tangent_escape_rmp_data_topic").value),
             lambda msg: self._store("tangent_escape_rmp_data", list(msg.data)),
             10,
@@ -279,8 +280,20 @@ class RmpflowTraceLogger(Node):
         )
         self.create_subscription(
             Float64MultiArray,
+            str(self.get_parameter("leaf_ablation_topic").value),
+            lambda msg: self._store("leaf_ablation", list(msg.data)),
+            10,
+        )
+        self.create_subscription(
+            Float64MultiArray,
             str(self.get_parameter("tangent_escape_geometry_data_topic").value),
             lambda msg: self._store("tangent_escape_geometry_data", list(msg.data)),
+            10,
+        )
+        self.create_subscription(
+            Float64MultiArray,
+            str(self.get_parameter("stability_certificate_data_topic").value),
+            lambda msg: self._store("stability_certificate_data", list(msg.data)),
             10,
         )
         self.create_subscription(
@@ -383,16 +396,69 @@ class RmpflowTraceLogger(Node):
         self._fill_vector(row, "command_q", "command_q", 6, "rad")
         self._fill_vector(row, "rmp_joint_accel", "rmp_joint_accel", 6, "rad_s2")
         self._fill_cartesian_vector(row, "rmp_tcp_accel", "rmp_tcp_accel", "m_s2")
-        self._fill_tangent_escape_filter_data(row)
-        self._fill_tangent_escape_filter_candidates(row)
         self._fill_tangent_escape_rmp_data(row)
         self._fill_tangent_escape_dual_solve(row)
+        self._fill_leaf_ablation(row)
         self._fill_tangent_escape_geometry_data(row)
+        self._fill_stability_certificate_data(row)
         self._fill_target_metric(row)
         self._fill_debug_state(row)
         self._fill_marker_summaries(row)
         self._fill_range_values(row)
         return row
+
+    def _fill_stability_certificate_data(self, row: Dict[str, Any]) -> None:
+        values = self._latest_data("stability_certificate_data")
+        if values is None:
+            return
+        row["stability_certificate_age_s"] = self._age_s(
+            "stability_certificate_data"
+        )
+        row["stability_certificate_dt_s"] = self._interval_s(
+            "stability_certificate_data"
+        )
+        if len(values) < 31 or int(round(float(values[0]))) != 1:
+            return
+        fields = [
+            "stability_schema_version",
+            "stability_base_gds_structural",
+            "stability_environment_static",
+            "stability_external_rmp_empty",
+            "stability_guard_enabled",
+            "stability_conditional_nonincrease",
+            "stability_escape_scale",
+            "stability_tank_energy",
+            "stability_tank_capacity",
+            "stability_escape_power_requested",
+            "stability_escape_power_applied",
+            "stability_solve_power",
+            "stability_clamp_power",
+            "stability_numerical_power",
+            "stability_positive_escape_energy",
+            "stability_negative_escape_energy",
+            "stability_net_escape_energy",
+            "stability_sample_count",
+            "stability_escape_metric_trace_requested",
+            "stability_escape_metric_trace_applied",
+            "stability_escape_force_norm_requested",
+            "stability_escape_force_norm_applied",
+            "stability_raw_qdd_norm",
+            "stability_command_qdd_norm",
+            "stability_clamp_active",
+            "stability_root_solve_offset",
+            "stability_escape_active",
+            "stability_tank_identity_residual",
+            "stability_energy_bound_violation",
+            "stability_nonincrease_upper_bound",
+            "stability_initial_energy",
+            "stability_base_config_profile_valid",
+            "stability_base_domain_valid",
+            "stability_base_metric_spd",
+            "stability_base_solve_valid",
+        ]
+        for index, field in enumerate(fields):
+            if index < len(values):
+                row[field] = self._fmt(values[index])
 
     def _fill_pose(self, row: Dict[str, Any], key: str, prefix: str) -> None:
         pose = self._latest_data(key)
@@ -514,287 +580,6 @@ class RmpflowTraceLogger(Node):
                 math.sqrt(sum(value * value for value in norm_terms))
             )
 
-    def _fill_delta_norm_from_values(
-        self,
-        row: Dict[str, Any],
-        values: List[float],
-        first_start: int,
-        second_start: int,
-        count: int,
-        field: str,
-    ) -> None:
-        deltas = []
-        for offset in range(count):
-            first_index = first_start + offset
-            second_index = second_start + offset
-            if first_index >= len(values) or second_index >= len(values):
-                return
-            try:
-                first = float(values[first_index])
-                second = float(values[second_index])
-            except (TypeError, ValueError):
-                return
-            if not math.isfinite(first) or not math.isfinite(second):
-                return
-            deltas.append(second - first)
-        if deltas:
-            row[field] = self._fmt(math.sqrt(sum(delta * delta for delta in deltas)))
-
-    @staticmethod
-    def _vector_dot(first: List[float], second: List[float]) -> Optional[float]:
-        if len(first) != len(second):
-            return None
-        try:
-            values = [(float(a), float(b)) for a, b in zip(first, second)]
-        except (TypeError, ValueError):
-            return None
-        if any(not math.isfinite(a) or not math.isfinite(b) for a, b in values):
-            return None
-        return sum(a * b for a, b in values)
-
-    def _tangent_escape_candidate_metrics(
-        self,
-        selected_candidate: Optional[Dict[str, Any]],
-        candidates: List[Dict[str, Any]],
-        candidate_cp_index: Optional[int],
-        stamped_candidate_data: Optional[StampedValue],
-    ) -> Dict[str, Any]:
-        metrics: Dict[str, Any] = {
-            "selected_second_best_score": None,
-            "selected_score_gap": None,
-            "previous_cp_index": self.previous_tangent_escape_cp_index,
-            "active_cp_changed": None,
-            "previous_direction_dot": None,
-            "selected_direction_changed": None,
-        }
-        if selected_candidate is None:
-            return metrics
-
-        selected_total = selected_candidate.get("total_score")
-        second_best: Optional[float] = None
-        for candidate in candidates:
-            if candidate is selected_candidate:
-                continue
-            try:
-                total_score = float(candidate.get("total_score"))
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(total_score):
-                continue
-            if second_best is None or total_score > second_best:
-                second_best = total_score
-        if second_best is not None:
-            metrics["selected_second_best_score"] = second_best
-        try:
-            selected_total_value = float(selected_total)
-        except (TypeError, ValueError):
-            selected_total_value = float("nan")
-        if math.isfinite(selected_total_value) and second_best is not None:
-            metrics["selected_score_gap"] = selected_total_value - second_best
-
-        previous_cp_index = self.previous_tangent_escape_cp_index
-        if previous_cp_index is not None and candidate_cp_index is not None:
-            metrics["active_cp_changed"] = int(previous_cp_index != candidate_cp_index)
-
-        direction = selected_candidate.get("direction")
-        if (
-            isinstance(direction, list) and
-            self.previous_tangent_escape_direction is not None
-        ):
-            dot_value = self._vector_dot(direction, self.previous_tangent_escape_direction)
-            if dot_value is not None:
-                metrics["previous_direction_dot"] = dot_value
-                metrics["selected_direction_changed"] = int(dot_value < 0.95)
-
-        candidate_stamp_s = stamped_candidate_data.stamp_s if stamped_candidate_data else None
-        is_new_candidate_data = (
-            candidate_stamp_s is not None and
-            candidate_stamp_s != self.last_tangent_escape_candidate_stamp_s
-        )
-        if is_new_candidate_data:
-            self.last_tangent_escape_candidate_stamp_s = candidate_stamp_s
-            if candidate_cp_index is not None:
-                self.previous_tangent_escape_cp_index = candidate_cp_index
-            if isinstance(direction, list) and len(direction) == 3:
-                self.previous_tangent_escape_direction = [float(value) for value in direction]
-
-        return metrics
-
-    def _fill_tangent_escape_candidate_metric_row(
-        self,
-        row: Dict[str, Any],
-        metrics: Dict[str, Any],
-    ) -> None:
-        fields = {
-            "tangent_escape_selected_second_best_score": "selected_second_best_score",
-            "tangent_escape_selected_score_gap": "selected_score_gap",
-            "tangent_escape_previous_cp_index": "previous_cp_index",
-            "tangent_escape_active_cp_changed": "active_cp_changed",
-            "tangent_escape_previous_direction_dot": "previous_direction_dot",
-            "tangent_escape_selected_direction_changed": "selected_direction_changed",
-        }
-        for row_field, metric_field in fields.items():
-            value = metrics.get(metric_field)
-            if value is None:
-                continue
-            row[row_field] = self._fmt(value)
-
-    def _fill_tangent_escape_filter_data(self, row: Dict[str, Any]) -> None:
-        values = self._latest_data("tangent_escape_filter_data")
-        if values is None:
-            return
-        row["tangent_escape_age_s"] = self._age_s("tangent_escape_filter_data")
-        row["tangent_escape_dt_s"] = self._interval_s("tangent_escape_filter_data")
-        if not values:
-            return
-        row["tangent_escape_active"] = self._fmt(values[0])
-        scalar_fields = [
-            ("tangent_escape_cp_index", 1),
-            ("tangent_escape_clearance", 2),
-            ("tangent_escape_activation", 3),
-            ("tangent_escape_score", 4),
-            ("tangent_escape_has_tangent", 5),
-        ]
-        for field, index in scalar_fields:
-            if index < len(values):
-                row[field] = self._fmt(values[index])
-        if len(values) > 1:
-            sensor_index = int(round(values[1]))
-            if 0 <= sensor_index < len(SENSOR_NAMES):
-                row["tangent_escape_sensor_index"] = sensor_index
-                row["tangent_escape_sensor_name"] = SENSOR_NAMES[sensor_index]
-                row["tangent_escape_sensor_parent_link"] = SENSOR_PARENT_LINKS[sensor_index]
-        self._fill_xyz_from_array(row, values, 6, "tangent_escape_cp")
-        self._fill_xyz_from_array(row, values, 9, "tangent_escape_obstacle")
-        self._fill_xyz_from_array(row, values, 12, "tangent_escape_normal")
-        self._fill_xyz_from_array(row, values, 15, "tangent_escape_tangent")
-        self._fill_xyz_from_array(row, values, 18, "tangent_escape_raw_cp_accel", "m_s2")
-        self._fill_xyz_from_array(row, values, 21, "tangent_escape_filtered_cp_accel", "m_s2")
-        self._fill_xyz_from_array(row, values, 24, "tangent_escape_raw_tcp_accel", "m_s2")
-        self._fill_xyz_from_array(row, values, 27, "tangent_escape_filtered_tcp_accel", "m_s2")
-        self._fill_joint_array_from_values(row, values, 30, "tangent_escape_raw_qdd")
-        self._fill_joint_array_from_values(row, values, 36, "tangent_escape_filtered_qdd")
-        self._fill_delta_norm_from_values(
-            row,
-            values,
-            30,
-            36,
-            6,
-            "tangent_escape_delta_qdd_norm",
-        )
-        self._fill_delta_norm_from_values(
-            row,
-            values,
-            18,
-            21,
-            3,
-            "tangent_escape_delta_cp_accel_norm_m_s2",
-        )
-        self._fill_delta_norm_from_values(
-            row,
-            values,
-            24,
-            27,
-            3,
-            "tangent_escape_delta_tcp_accel_norm_m_s2",
-        )
-
-    def _fill_tangent_escape_filter_candidates(self, row: Dict[str, Any]) -> None:
-        values = self._latest_data("tangent_escape_filter_candidate_data")
-        if values is None:
-            return
-        row["tangent_escape_candidate_data_age_s"] = self._age_s(
-            "tangent_escape_filter_candidate_data"
-        )
-        row["tangent_escape_candidate_data_dt_s"] = self._interval_s(
-            "tangent_escape_filter_candidate_data"
-        )
-        if not values:
-            return
-
-        active = bool(values[0] >= 0.5)
-        payload: Dict[str, Any] = {
-            "active": active,
-            "candidate_count": 0,
-            "selected_candidate_index": None,
-            "weights": {},
-            "candidates": [],
-        }
-        row["tangent_escape_candidate_active"] = self._fmt(values[0])
-        if not active or len(values) < 13:
-            row["tangent_escape_candidates_json"] = json.dumps(payload, separators=(",", ":"))
-            return
-
-        candidate_count = max(0, int(round(values[1])))
-        selected_candidate_index = int(round(values[2]))
-        candidate_cp_index = int(round(values[3])) if len(values) > 3 else None
-        payload["candidate_count"] = candidate_count
-        payload["selected_candidate_index"] = selected_candidate_index
-        payload["weights"] = {
-            "goal": values[7],
-            "continuity": values[8],
-            "up": values[9],
-            "duplicate_risk": values[10],
-            "adjacent_block": values[11],
-            "branch_hold": values[12],
-        }
-        row["tangent_escape_candidate_count"] = candidate_count
-        row["tangent_escape_selected_candidate_index"] = selected_candidate_index
-
-        stride = 18
-        start = 13
-        candidates = []
-        selected_candidate: Optional[Dict[str, Any]] = None
-        for candidate_offset in range(candidate_count):
-            base = start + candidate_offset * stride
-            if base + stride > len(values):
-                break
-            candidate = {
-                "index": int(round(values[base])),
-                "direction": [values[base + 1], values[base + 2], values[base + 3]],
-                "goal_score": values[base + 4],
-                "continuity_score": values[base + 5],
-                "up_score": values[base + 6],
-                "duplicate_risk_score": values[base + 7],
-                "adjacent_block_score": values[base + 8],
-                "branch_hold_score": values[base + 9],
-                "weighted_goal": values[base + 10],
-                "weighted_continuity": values[base + 11],
-                "weighted_up": values[base + 12],
-                "weighted_duplicate_risk": values[base + 13],
-                "weighted_adjacent_block": values[base + 14],
-                "weighted_branch_hold": values[base + 15],
-                "total_score": values[base + 16],
-                "selected": bool(values[base + 17] >= 0.5),
-            }
-            candidates.append(candidate)
-            if candidate["selected"]:
-                selected_candidate = candidate
-                row["tangent_escape_selected_direction_x"] = self._fmt(values[base + 1])
-                row["tangent_escape_selected_direction_y"] = self._fmt(values[base + 2])
-                row["tangent_escape_selected_direction_z"] = self._fmt(values[base + 3])
-                row["tangent_escape_selected_total_score"] = self._fmt(values[base + 16])
-                row["tangent_escape_selected_goal_score"] = self._fmt(values[base + 4])
-                row["tangent_escape_selected_continuity_score"] = self._fmt(values[base + 5])
-                row["tangent_escape_selected_duplicate_risk_score"] = self._fmt(values[base + 7])
-                row["tangent_escape_selected_adjacent_block_score"] = self._fmt(values[base + 8])
-                row["tangent_escape_selected_branch_hold_score"] = self._fmt(values[base + 9])
-        if selected_candidate is None:
-            for candidate in candidates:
-                if candidate.get("index") == selected_candidate_index:
-                    selected_candidate = candidate
-                    break
-        metrics = self._tangent_escape_candidate_metrics(
-            selected_candidate,
-            candidates,
-            candidate_cp_index,
-            self.latest.get("tangent_escape_filter_candidate_data"),
-        )
-        payload["metrics"] = metrics
-        self._fill_tangent_escape_candidate_metric_row(row, metrics)
-        payload["candidates"] = candidates
-        row["tangent_escape_candidates_json"] = json.dumps(payload, separators=(",", ":"))
-
     def _fill_tangent_escape_rmp_data(self, row: Dict[str, Any]) -> None:
         values = self._latest_data("tangent_escape_rmp_data")
         if values is None:
@@ -804,6 +589,22 @@ class RmpflowTraceLogger(Node):
         if not values:
             return
         row["tangent_escape_rmp_active"] = self._fmt(values[0])
+
+        # An inactive tangent leaf publishes the one-value record [0].  The
+        # preserved canonical-velocity mode uses schema 6/61 values; the active
+        # risk-damped mode uses schema 7/68 values followed by the same
+        # 17-value candidate records.
+        if len(values) <= 26:
+            return
+        schema_id = float(values[26])
+        if not math.isfinite(schema_id):
+            return
+        row["tangent_escape_rmp_schema_id"] = self._fmt(schema_id)
+        schema = int(round(schema_id))
+        prefix_size = 61 if schema == 6 else 68 if schema == 7 else 0
+        if prefix_size == 0 or len(values) < prefix_size:
+            return
+
         scalar_fields = [
             ("tangent_escape_rmp_control_point_index", 1),
             ("tangent_escape_rmp_clearance_m", 2),
@@ -815,38 +616,49 @@ class RmpflowTraceLogger(Node):
             ("tangent_escape_rmp_tangent_velocity_m_s", 8),
             ("tangent_escape_rmp_desired_tangent_accel_m_s2", 9),
             ("tangent_escape_rmp_effective_metric_scalar", 10),
-            ("tangent_escape_rmp_leaf_mode_id", 26),
-            ("tangent_escape_rmp_scalar_s_m", 27),
-            ("tangent_escape_rmp_scalar_target_m", 28),
+            ("tangent_escape_rmp_canonical_coordinate_m", 27),
+            ("tangent_escape_rmp_velocity_reference_m_s", 28),
             ("tangent_escape_rmp_scalar_velocity_m_s", 29),
-            ("tangent_escape_rmp_scalar_error_m", 30),
+            ("tangent_escape_rmp_velocity_error_m_s", 30),
+            ("tangent_escape_rmp_obstacle_episode_id", 31),
+            ("tangent_escape_rmp_handoff_reason_id", 32),
+            ("tangent_escape_rmp_handoff_phase_id", 33),
             ("tangent_escape_rmp_candidate_count", 37),
             ("tangent_escape_rmp_selected_candidate_index", 38),
-            ("tangent_escape_rmp_selected_candidate_weight", 39),
+            ("tangent_escape_rmp_selected_candidate_feasible", 39),
             ("tangent_escape_rmp_selected_candidate_score", 40),
             ("tangent_escape_rmp_selected_goal_score", 41),
             ("tangent_escape_rmp_selected_continuity_score", 42),
-            ("tangent_escape_rmp_selected_adjacent_risk", 43),
-            ("tangent_escape_rmp_softmax_beta", 44),
-            ("tangent_escape_rmp_branch_weight_sum", 45),
-            ("tangent_escape_rmp_weight_entropy", 46),
-            ("tangent_escape_rmp_supervisor_mode_id", 47),
-            ("tangent_escape_rmp_hold_active", 48),
-            ("tangent_escape_rmp_hold_age_s", 49),
-            ("tangent_escape_rmp_selected_hold_bonus", 50),
-            ("tangent_escape_rmp_stuck_score", 51),
-            ("tangent_escape_rmp_stuck_timer_s", 52),
+            ("tangent_escape_rmp_selected_sector_risk", 43),
+            ("tangent_escape_rmp_alpha_stuck", 44),
+            ("tangent_escape_rmp_lambda", 45),
+            ("tangent_escape_rmp_release_velocity_gate", 46),
+            ("tangent_escape_rmp_state_mode_id", 47),
+            ("tangent_escape_rmp_drive_ramp", 48),
+            ("tangent_escape_rmp_release_brake", 49),
+            ("tangent_escape_rmp_raw_activation", 50),
+            ("tangent_escape_rmp_goal_progress_m_s", 51),
             ("tangent_escape_rmp_stuck_active", 53),
-            ("tangent_escape_rmp_metric_boost", 54),
-            ("tangent_escape_rmp_accel_boost", 55),
+            ("tangent_escape_rmp_z", 54),
             ("tangent_escape_rmp_selected_blocked_penalty", 56),
             ("tangent_escape_rmp_max_blocked_memory", 57),
-            ("tangent_escape_rmp_branch_age_s", 58),
-            ("tangent_escape_rmp_branch_progress_m", 59),
-            ("tangent_escape_rmp_clearance_improvement_m", 60),
+            ("tangent_escape_rmp_command_distance_m", 58),
+            ("tangent_escape_rmp_actual_distance_m", 59),
+            ("tangent_escape_rmp_move_ratio", 60),
         ]
         for field, index in scalar_fields:
-            if index < len(values):
+            row[field] = self._fmt(values[index])
+        if schema == 7:
+            risk_fields = [
+                ("tangent_escape_rmp_clearance_rate_m_s", 61),
+                ("tangent_escape_rmp_closing_speed_m_s", 62),
+                ("tangent_escape_rmp_risk_distance_accel_m_s2", 63),
+                ("tangent_escape_rmp_risk_approach_accel_m_s2", 64),
+                ("tangent_escape_rmp_risk_accel_m_s2", 65),
+                ("tangent_escape_rmp_tangent_damping_accel_m_s2", 66),
+                ("tangent_escape_rmp_accel_input_m_s2", 67),
+            ]
+            for field, index in risk_fields:
                 row[field] = self._fmt(values[index])
         self._fill_xyz_from_array(row, values, 11, "tangent_escape_rmp_control_point", "m")
         self._fill_xyz_from_array(row, values, 14, "tangent_escape_rmp_obstacle", "m")
@@ -859,7 +671,6 @@ class RmpflowTraceLogger(Node):
             "tangent_escape_rmp_desired_accel",
             "m_s2",
         )
-        self._fill_xyz_from_array(row, values, 31, "tangent_escape_rmp_mode_origin", "m")
         self._fill_xyz_from_array(row, values, 34, "tangent_escape_rmp_mode_tangent")
 
         def vector3(start: int) -> Optional[List[float]]:
@@ -892,25 +703,21 @@ class RmpflowTraceLogger(Node):
                 accel_dot_tangent
             )
 
-        candidates = []
-        candidate_count = 0
-        if 37 < len(values) and math.isfinite(float(values[37])):
-            candidate_count = max(int(round(float(values[37]))), 0)
-        candidate_start = 61
+        candidate_count = (
+            max(int(round(float(values[37]))), 0)
+            if math.isfinite(float(values[37]))
+            else 0
+        )
+        candidate_start = prefix_size
         candidate_stride = 17
-        available_candidate_values = max(len(values) - candidate_start, 0)
-        if candidate_count > 0 and available_candidate_values >= candidate_count * 32:
-            candidate_stride = 32
-        elif candidate_count > 0 and available_candidate_values >= candidate_count * 29:
-            candidate_stride = 29
-        elif candidate_count > 0 and available_candidate_values >= candidate_count * 28:
-            candidate_stride = 28
-        elif candidate_count > 0 and available_candidate_values >= candidate_count * 18:
-            candidate_stride = 18
-        for candidate_index in range(candidate_count):
+        available_candidate_count = max(
+            (len(values) - candidate_start) // candidate_stride,
+            0,
+        )
+        decoded_candidate_count = min(candidate_count, available_candidate_count)
+        candidates = []
+        for candidate_index in range(decoded_candidate_count):
             base = candidate_start + candidate_index * candidate_stride
-            if base + candidate_stride > len(values):
-                break
             direction = [
                 values[base + 10],
                 values[base + 11],
@@ -918,154 +725,56 @@ class RmpflowTraceLogger(Node):
             ]
             candidate_normal_dot = dot(normal, direction)
             candidates.append({
-                "slot": values[base + 0],
-                "weight": values[base + 1],
+                "seed": values[base + 0],
+                "feasible": values[base + 1],
                 "score": values[base + 2],
                 "goalScore": values[base + 3],
                 "continuityScore": values[base + 4],
-                "adjacentRisk": values[base + 5],
-                "holdBonus": values[base + 6],
+                "sectorRisk": values[base + 5],
+                "accelerationJumpPenalty": values[base + 6],
                 "blockedPenalty": values[base + 7],
-                "stuckBonus": values[base + 8],
-                "baseScore": values[base + 9],
+                "alphaStuck": values[base + 8],
+                "tangentDisplacement": values[base + 9],
                 "direction": direction,
                 "normalDotTangent": candidate_normal_dot,
                 "metricScalar": values[base + 13],
-                "metricBoost": values[base + 14],
-                "accelBoost": values[base + 15],
+                "scalarVelocity": values[base + 14],
+                "scalarAcceleration": values[base + 15],
                 "active": values[base + 16],
-                "duplicateRisk": values[base + 17] if candidate_stride >= 18 else None,
-                "scalarS": values[base + 18] if candidate_stride >= 28 else None,
-                "scalarVelocity": values[base + 19] if candidate_stride >= 28 else None,
-                "scalarError": values[base + 20] if candidate_stride >= 28 else None,
-                "potentialEnergy": values[base + 21] if candidate_stride >= 28 else None,
-                "kineticEnergy": values[base + 22] if candidate_stride >= 28 else None,
-                "lyapunovEnergy": values[base + 23] if candidate_stride >= 28 else None,
-                "dampingVdot": values[base + 24] if candidate_stride >= 28 else None,
-                "weightsLatched": values[base + 25] if candidate_stride >= 28 else None,
-                "modeGeneration": values[base + 26] if candidate_stride >= 28 else None,
-                "boundedPotential": values[base + 27] if candidate_stride >= 28 else None,
-                "modeNormalDotTangent": values[base + 28] if candidate_stride >= 29 else None,
-                "clearanceRate": values[base + 29] if candidate_stride >= 32 else None,
-                "collisionAccel": values[base + 30] if candidate_stride >= 32 else None,
-                "scaledCollisionAccel": values[base + 31] if candidate_stride >= 32 else None,
             })
         if candidates:
-            def finite_candidate_values(key: str) -> List[float]:
-                return [
-                    float(candidate[key])
-                    for candidate in candidates
-                    if isinstance(candidate.get(key), (int, float)) and
-                    math.isfinite(float(candidate[key]))
-                ]
-
-            potentials = finite_candidate_values("potentialEnergy")
-            kinetics = finite_candidate_values("kineticEnergy")
-            lyapunovs = finite_candidate_values("lyapunovEnergy")
-            damping_vdots = finite_candidate_values("dampingVdot")
-            latched_flags = finite_candidate_values("weightsLatched")
-            generations = finite_candidate_values("modeGeneration")
-            bounded_flags = finite_candidate_values("boundedPotential")
-            if potentials:
-                row["tangent_escape_rmp_escape_potential"] = self._fmt(sum(potentials))
-            if kinetics:
-                row["tangent_escape_rmp_escape_kinetic"] = self._fmt(sum(kinetics))
-            if lyapunovs:
-                row["tangent_escape_rmp_escape_lyapunov"] = self._fmt(sum(lyapunovs))
-            if damping_vdots:
-                row["tangent_escape_rmp_escape_damping_vdot"] = self._fmt(
-                    sum(damping_vdots)
-                )
-            if latched_flags:
-                row["tangent_escape_rmp_weights_latched"] = self._fmt(min(latched_flags))
-            if generations:
-                row["tangent_escape_rmp_mode_generation"] = self._fmt(max(generations))
-            if bounded_flags:
-                row["tangent_escape_rmp_bounded_potential"] = self._fmt(min(bounded_flags))
             selected_slot = None
-            if 38 < len(values) and math.isfinite(float(values[38])):
+            if math.isfinite(float(values[38])):
                 selected_slot = int(round(float(values[38])))
             selected_candidate = None
             for candidate in candidates:
-                if selected_slot is not None and int(round(float(candidate["slot"]))) == selected_slot:
+                if (
+                    selected_slot is not None and
+                    int(round(float(candidate["seed"]))) == selected_slot
+                ):
                     selected_candidate = candidate
                     break
-            sorted_by_score = sorted(
-                candidates,
-                key=lambda candidate: float(candidate["score"]),
-                reverse=True,
-            )
-            sorted_by_weight = sorted(
-                candidates,
-                key=lambda candidate: float(candidate["weight"]),
-                reverse=True,
-            )
             if selected_candidate is not None:
-                selected_duplicate_risk = selected_candidate.get("duplicateRisk")
-                if (
-                    isinstance(selected_duplicate_risk, (int, float)) and
-                    math.isfinite(float(selected_duplicate_risk))
-                ):
-                    row["tangent_escape_rmp_selected_duplicate_risk"] = self._fmt(
-                        selected_duplicate_risk
-                    )
-                selected_clearance_rate = selected_candidate.get("clearanceRate")
-                selected_collision_accel = selected_candidate.get("collisionAccel")
-                selected_scaled_collision_accel = selected_candidate.get(
-                    "scaledCollisionAccel"
-                )
-                if (
-                    isinstance(selected_clearance_rate, (int, float)) and
-                    math.isfinite(float(selected_clearance_rate))
-                ):
-                    row["tangent_escape_rmp_clearance_rate_m_s"] = self._fmt(
-                        selected_clearance_rate
-                    )
-                if (
-                    isinstance(selected_collision_accel, (int, float)) and
-                    math.isfinite(float(selected_collision_accel))
-                ):
-                    row["tangent_escape_rmp_collision_accel_m_s2"] = self._fmt(
-                        selected_collision_accel
-                    )
-                if (
-                    isinstance(selected_scaled_collision_accel, (int, float)) and
-                    math.isfinite(float(selected_scaled_collision_accel))
-                ):
-                    row["tangent_escape_rmp_scaled_collision_accel_m_s2"] = self._fmt(
-                        selected_scaled_collision_accel
-                    )
-                if (
-                    isinstance(selected_collision_accel, (int, float)) and
-                    isinstance(selected_scaled_collision_accel, (int, float)) and
-                    math.isfinite(float(selected_collision_accel)) and
-                    math.isfinite(float(selected_scaled_collision_accel)) and
-                    abs(float(selected_collision_accel)) > 1e-12
-                ):
-                    row["tangent_escape_rmp_collision_accel_scale"] = self._fmt(
-                        float(selected_scaled_collision_accel) /
-                        float(selected_collision_accel)
-                    )
-                if len(sorted_by_score) >= 2:
+                selected_score = float(selected_candidate["score"])
+                other_scores = [
+                    float(candidate["score"])
+                    for candidate in candidates
+                    if candidate is not selected_candidate and
+                    math.isfinite(float(candidate["score"]))
+                ]
+                if math.isfinite(selected_score) and other_scores:
                     row["tangent_escape_rmp_selected_score_gap"] = self._fmt(
-                        float(selected_candidate["score"]) - float(sorted_by_score[1]["score"])
+                        selected_score - max(other_scores)
                     )
-                if len(sorted_by_weight) >= 2:
-                    row["tangent_escape_rmp_selected_weight_gap"] = self._fmt(
-                        float(selected_candidate["weight"]) - float(sorted_by_weight[1]["weight"])
-                    )
-            row["tangent_escape_rmp_max_candidate_adjacent_risk"] = self._fmt(
-                max(float(candidate["adjacentRisk"]) for candidate in candidates)
-            )
-            duplicate_risks = [
-                float(candidate["duplicateRisk"])
+
+            sector_risks = [
+                float(candidate["sectorRisk"])
                 for candidate in candidates
-                if isinstance(candidate.get("duplicateRisk"), (int, float)) and
-                math.isfinite(float(candidate["duplicateRisk"]))
+                if math.isfinite(float(candidate["sectorRisk"]))
             ]
-            if duplicate_risks:
-                row["tangent_escape_rmp_max_candidate_duplicate_risk"] = self._fmt(
-                    max(duplicate_risks)
+            if sector_risks:
+                row["tangent_escape_rmp_max_candidate_sector_risk"] = self._fmt(
+                    max(sector_risks)
                 )
             finite_candidate_normal_dots = [
                 abs(float(candidate["normalDotTangent"]))
@@ -1078,7 +787,11 @@ class RmpflowTraceLogger(Node):
                     max(finite_candidate_normal_dots)
                 )
             row["tangent_escape_rmp_candidates_json"] = json.dumps(
-                {"count": candidate_count, "candidates": candidates},
+                {
+                    "count": candidate_count,
+                    "decodedCount": decoded_candidate_count,
+                    "candidates": candidates,
+                },
                 separators=(",", ":"),
             )
 
@@ -1115,6 +828,66 @@ class RmpflowTraceLogger(Node):
         for field, index in scalar_fields:
             if index < len(values):
                 row[field] = self._fmt(values[index])
+
+    def _fill_leaf_ablation(self, row: Dict[str, Any]) -> None:
+        values = self._latest_data("leaf_ablation")
+        if values is None:
+            return
+        row["leaf_ablation_age_s"] = self._age_s("leaf_ablation")
+        row["leaf_ablation_dt_s"] = self._interval_s("leaf_ablation")
+        if len(values) < 25 or int(round(float(values[0]))) != 1:
+            return
+
+        record_count = max(0, int(round(float(values[1]))))
+        row["leaf_ablation_schema_version"] = self._fmt(values[0])
+        row["leaf_ablation_record_count"] = record_count
+        scalar_fields = [
+            ("leaf_ablation_max_joint_accel_rad_s2", 2),
+            ("leaf_ablation_raw_qdd_norm", 3),
+            ("leaf_ablation_command_qdd_norm", 4),
+            ("leaf_ablation_clip_direction_cosine", 5),
+            ("leaf_ablation_saturated_joint_count", 6),
+        ]
+        for field, index in scalar_fields:
+            row[field] = self._fmt(values[index])
+
+        acceleration_limit = abs(float(values[2]))
+        for joint in range(6):
+            raw_value = float(values[7 + joint])
+            command_value = float(values[13 + joint])
+            row[f"leaf_ablation_raw_qdd_{joint + 1}_rad_s2"] = self._fmt(raw_value)
+            row[f"leaf_ablation_command_qdd_{joint + 1}_rad_s2"] = self._fmt(
+                command_value
+            )
+            row[f"leaf_ablation_clip_delta_qdd_{joint + 1}_rad_s2"] = self._fmt(
+                values[19 + joint]
+            )
+            row[f"leaf_ablation_joint_{joint + 1}_saturated"] = int(
+                abs(raw_value) > acceleration_limit + 1e-12
+            )
+
+        record_offset = 25
+        record_size = 17
+        available_record_count = min(
+            record_count,
+            max(0, (len(values) - record_offset) // record_size),
+        )
+        for record_index in range(available_record_count):
+            offset = record_offset + record_index * record_size
+            group_id = int(round(float(values[offset])))
+            group_name = LEAF_ABLATION_GROUPS.get(group_id, "other")
+            prefix = f"leaf_ablation_{group_name}"
+            row[f"{prefix}_active"] = self._fmt(values[offset + 1])
+            row[f"{prefix}_metric_trace"] = self._fmt(values[offset + 2])
+            row[f"{prefix}_metric_frobenius"] = self._fmt(values[offset + 3])
+            row[f"{prefix}_force_norm"] = self._fmt(values[offset + 4])
+            for joint in range(6):
+                row[f"{prefix}_delta_raw_qdd_{joint + 1}_rad_s2"] = self._fmt(
+                    values[offset + 5 + joint]
+                )
+                row[f"{prefix}_delta_command_qdd_{joint + 1}_rad_s2"] = self._fmt(
+                    values[offset + 11 + joint]
+                )
 
     def _fill_tangent_escape_geometry_data(self, row: Dict[str, Any]) -> None:
         values = self._latest_data("tangent_escape_geometry_data")
@@ -1369,72 +1142,6 @@ class RmpflowTraceLogger(Node):
         )
         header.extend(
             [
-                "tangent_escape_age_s",
-                "tangent_escape_dt_s",
-                "tangent_escape_active",
-                "tangent_escape_cp_index",
-                "tangent_escape_sensor_index",
-                "tangent_escape_sensor_name",
-                "tangent_escape_sensor_parent_link",
-                "tangent_escape_clearance",
-                "tangent_escape_activation",
-                "tangent_escape_score",
-                "tangent_escape_has_tangent",
-            ]
-        )
-        for prefix, suffix in [
-            ("tangent_escape_cp", ""),
-            ("tangent_escape_obstacle", ""),
-            ("tangent_escape_normal", ""),
-            ("tangent_escape_tangent", ""),
-            ("tangent_escape_raw_cp_accel", "m_s2"),
-            ("tangent_escape_filtered_cp_accel", "m_s2"),
-            ("tangent_escape_raw_tcp_accel", "m_s2"),
-            ("tangent_escape_filtered_tcp_accel", "m_s2"),
-        ]:
-            axis_suffix = f"_{suffix}" if suffix else ""
-            header.extend(f"{prefix}_{axis}{axis_suffix}" for axis in ["x", "y", "z"])
-            header.append(f"{prefix}_norm{axis_suffix}")
-        for prefix in [
-            "tangent_escape_raw_qdd",
-            "tangent_escape_filtered_qdd",
-        ]:
-            header.extend(f"{prefix}_{index + 1}_rad_s2" for index in range(6))
-            header.append(f"{prefix}_norm")
-        header.extend(
-            [
-                "tangent_escape_delta_qdd_norm",
-                "tangent_escape_delta_cp_accel_norm_m_s2",
-                "tangent_escape_delta_tcp_accel_norm_m_s2",
-            ]
-        )
-        header.extend(
-            [
-                "tangent_escape_candidate_data_age_s",
-                "tangent_escape_candidate_data_dt_s",
-                "tangent_escape_candidate_active",
-                "tangent_escape_candidate_count",
-                "tangent_escape_selected_candidate_index",
-                "tangent_escape_selected_direction_x",
-                "tangent_escape_selected_direction_y",
-                "tangent_escape_selected_direction_z",
-                "tangent_escape_selected_total_score",
-                "tangent_escape_selected_goal_score",
-                "tangent_escape_selected_continuity_score",
-                "tangent_escape_selected_duplicate_risk_score",
-                "tangent_escape_selected_adjacent_block_score",
-                "tangent_escape_selected_branch_hold_score",
-                "tangent_escape_selected_second_best_score",
-                "tangent_escape_selected_score_gap",
-                "tangent_escape_previous_cp_index",
-                "tangent_escape_active_cp_changed",
-                "tangent_escape_previous_direction_dot",
-                "tangent_escape_selected_direction_changed",
-                "tangent_escape_candidates_json",
-            ]
-        )
-        header.extend(
-            [
                 "tangent_escape_rmp_age_s",
                 "tangent_escape_rmp_dt_s",
                 "tangent_escape_rmp_active",
@@ -1447,55 +1154,49 @@ class RmpflowTraceLogger(Node):
                 "tangent_escape_rmp_score",
                 "tangent_escape_rmp_tangent_velocity_m_s",
                 "tangent_escape_rmp_desired_tangent_accel_m_s2",
-                "tangent_escape_rmp_clearance_rate_m_s",
-                "tangent_escape_rmp_collision_accel_m_s2",
-                "tangent_escape_rmp_scaled_collision_accel_m_s2",
-                "tangent_escape_rmp_collision_accel_scale",
                 "tangent_escape_rmp_effective_metric_scalar",
-                "tangent_escape_rmp_leaf_mode_id",
-                "tangent_escape_rmp_scalar_s_m",
-                "tangent_escape_rmp_scalar_target_m",
+                "tangent_escape_rmp_schema_id",
+                "tangent_escape_rmp_clearance_rate_m_s",
+                "tangent_escape_rmp_closing_speed_m_s",
+                "tangent_escape_rmp_risk_distance_accel_m_s2",
+                "tangent_escape_rmp_risk_approach_accel_m_s2",
+                "tangent_escape_rmp_risk_accel_m_s2",
+                "tangent_escape_rmp_tangent_damping_accel_m_s2",
+                "tangent_escape_rmp_accel_input_m_s2",
+                "tangent_escape_rmp_canonical_coordinate_m",
+                "tangent_escape_rmp_velocity_reference_m_s",
+                "tangent_escape_rmp_velocity_error_m_s",
+                "tangent_escape_rmp_obstacle_episode_id",
+                "tangent_escape_rmp_handoff_reason_id",
+                "tangent_escape_rmp_handoff_phase_id",
+                "tangent_escape_rmp_selected_candidate_feasible",
+                "tangent_escape_rmp_selected_sector_risk",
+                "tangent_escape_rmp_alpha_stuck",
+                "tangent_escape_rmp_lambda",
+                "tangent_escape_rmp_release_velocity_gate",
+                "tangent_escape_rmp_state_mode_id",
+                "tangent_escape_rmp_drive_ramp",
+                "tangent_escape_rmp_release_brake",
+                "tangent_escape_rmp_raw_activation",
+                "tangent_escape_rmp_goal_progress_m_s",
+                "tangent_escape_rmp_z",
+                "tangent_escape_rmp_command_distance_m",
+                "tangent_escape_rmp_actual_distance_m",
+                "tangent_escape_rmp_move_ratio",
                 "tangent_escape_rmp_scalar_velocity_m_s",
-                "tangent_escape_rmp_scalar_error_m",
                 "tangent_escape_rmp_candidate_count",
                 "tangent_escape_rmp_selected_candidate_index",
-                "tangent_escape_rmp_selected_candidate_weight",
                 "tangent_escape_rmp_selected_candidate_score",
                 "tangent_escape_rmp_selected_goal_score",
                 "tangent_escape_rmp_selected_continuity_score",
-                "tangent_escape_rmp_selected_duplicate_risk",
-                "tangent_escape_rmp_selected_adjacent_risk",
-                "tangent_escape_rmp_softmax_beta",
-                "tangent_escape_rmp_branch_weight_sum",
-                "tangent_escape_rmp_weight_entropy",
-                "tangent_escape_rmp_escape_potential",
-                "tangent_escape_rmp_escape_kinetic",
-                "tangent_escape_rmp_escape_lyapunov",
-                "tangent_escape_rmp_escape_damping_vdot",
-                "tangent_escape_rmp_weights_latched",
-                "tangent_escape_rmp_mode_generation",
-                "tangent_escape_rmp_bounded_potential",
-                "tangent_escape_rmp_supervisor_mode_id",
-                "tangent_escape_rmp_hold_active",
-                "tangent_escape_rmp_hold_age_s",
-                "tangent_escape_rmp_selected_hold_bonus",
-                "tangent_escape_rmp_stuck_score",
-                "tangent_escape_rmp_stuck_timer_s",
                 "tangent_escape_rmp_stuck_active",
-                "tangent_escape_rmp_metric_boost",
-                "tangent_escape_rmp_accel_boost",
                 "tangent_escape_rmp_selected_blocked_penalty",
                 "tangent_escape_rmp_max_blocked_memory",
-                "tangent_escape_rmp_branch_age_s",
-                "tangent_escape_rmp_branch_progress_m",
-                "tangent_escape_rmp_clearance_improvement_m",
                 "tangent_escape_rmp_normal_dot_tangent",
                 "tangent_escape_rmp_desired_accel_dot_normal_m_s2",
                 "tangent_escape_rmp_desired_accel_dot_tangent_m_s2",
                 "tangent_escape_rmp_selected_score_gap",
-                "tangent_escape_rmp_selected_weight_gap",
-                "tangent_escape_rmp_max_candidate_duplicate_risk",
-                "tangent_escape_rmp_max_candidate_adjacent_risk",
+                "tangent_escape_rmp_max_candidate_sector_risk",
                 "tangent_escape_rmp_max_abs_candidate_normal_dot_tangent",
                 "tangent_escape_rmp_candidates_json",
             ]
@@ -1506,12 +1207,52 @@ class RmpflowTraceLogger(Node):
             ("tangent_escape_rmp_normal", ""),
             ("tangent_escape_rmp_tangent", ""),
             ("tangent_escape_rmp_desired_accel", "m_s2"),
-            ("tangent_escape_rmp_mode_origin", "m"),
             ("tangent_escape_rmp_mode_tangent", ""),
         ]:
             axis_suffix = f"_{suffix}" if suffix else ""
             header.extend(f"{prefix}_{axis}{axis_suffix}" for axis in ["x", "y", "z"])
             header.append(f"{prefix}_norm{axis_suffix}")
+        header.extend(
+            [
+                "stability_certificate_age_s",
+                "stability_certificate_dt_s",
+                "stability_schema_version",
+                "stability_base_gds_structural",
+                "stability_environment_static",
+                "stability_external_rmp_empty",
+                "stability_guard_enabled",
+                "stability_conditional_nonincrease",
+                "stability_escape_scale",
+                "stability_tank_energy",
+                "stability_tank_capacity",
+                "stability_escape_power_requested",
+                "stability_escape_power_applied",
+                "stability_solve_power",
+                "stability_clamp_power",
+                "stability_numerical_power",
+                "stability_positive_escape_energy",
+                "stability_negative_escape_energy",
+                "stability_net_escape_energy",
+                "stability_sample_count",
+                "stability_escape_metric_trace_requested",
+                "stability_escape_metric_trace_applied",
+                "stability_escape_force_norm_requested",
+                "stability_escape_force_norm_applied",
+                "stability_raw_qdd_norm",
+                "stability_command_qdd_norm",
+                "stability_clamp_active",
+                "stability_root_solve_offset",
+                "stability_escape_active",
+                "stability_tank_identity_residual",
+                "stability_energy_bound_violation",
+                "stability_nonincrease_upper_bound",
+                "stability_initial_energy",
+                "stability_base_config_profile_valid",
+                "stability_base_domain_valid",
+                "stability_base_metric_spd",
+                "stability_base_solve_valid",
+            ]
+        )
         header.extend(
             [
                 "tangent_escape_dual_solve_age_s",
@@ -1546,6 +1287,46 @@ class RmpflowTraceLogger(Node):
                 "tangent_escape_dual_effective_metric_scalar",
             ]
         )
+        header.extend(
+            [
+                "leaf_ablation_age_s",
+                "leaf_ablation_dt_s",
+                "leaf_ablation_schema_version",
+                "leaf_ablation_record_count",
+                "leaf_ablation_max_joint_accel_rad_s2",
+                "leaf_ablation_raw_qdd_norm",
+                "leaf_ablation_command_qdd_norm",
+                "leaf_ablation_clip_direction_cosine",
+                "leaf_ablation_saturated_joint_count",
+            ]
+        )
+        for prefix in [
+            "leaf_ablation_raw_qdd",
+            "leaf_ablation_command_qdd",
+            "leaf_ablation_clip_delta_qdd",
+        ]:
+            header.extend(f"{prefix}_{joint + 1}_rad_s2" for joint in range(6))
+        header.extend(
+            f"leaf_ablation_joint_{joint + 1}_saturated" for joint in range(6)
+        )
+        for group_name in LEAF_ABLATION_GROUPS.values():
+            prefix = f"leaf_ablation_{group_name}"
+            header.extend(
+                [
+                    f"{prefix}_active",
+                    f"{prefix}_metric_trace",
+                    f"{prefix}_metric_frobenius",
+                    f"{prefix}_force_norm",
+                ]
+            )
+            header.extend(
+                f"{prefix}_delta_raw_qdd_{joint + 1}_rad_s2"
+                for joint in range(6)
+            )
+            header.extend(
+                f"{prefix}_delta_command_qdd_{joint + 1}_rad_s2"
+                for joint in range(6)
+            )
         header.extend(
             [
                 "tangent_escape_geometry_age_s",

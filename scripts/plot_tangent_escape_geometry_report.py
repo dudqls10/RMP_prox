@@ -102,13 +102,19 @@ def read_samples(path: Path) -> List[Dict[str, object]]:
     first_time = parse_float(rows[0], "time_ros_s") if rows else float("nan")
     samples: List[Dict[str, object]] = []
     for csv_index, row in enumerate(rows):
-        if parse_float(row, "tangent_escape_geometry_active") < 0.5:
+        geometry_active = parse_float(row, "tangent_escape_geometry_active")
+        sensor_index = parse_float(row, "tangent_escape_geometry_sensor_index")
+        if (
+            not math.isfinite(geometry_active) or
+            geometry_active < 0.5 or
+            not math.isfinite(sensor_index)
+        ):
             continue
         stamp = parse_float(row, "time_ros_s")
         sample = {
             "csvIndex": csv_index,
             "time": finite_or_none(stamp - first_time if math.isfinite(stamp) and math.isfinite(first_time) else stamp),
-            "sensorIndex": int(round(parse_float(row, "tangent_escape_geometry_sensor_index"))),
+            "sensorIndex": int(round(sensor_index)),
             "sensorName": row.get("tangent_escape_geometry_sensor_name", ""),
             "sensorParent": row.get("tangent_escape_geometry_sensor_parent_link", ""),
             "clearance": finite_or_none(parse_float(row, "tangent_escape_geometry_clearance")),
@@ -351,7 +357,9 @@ update();
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Create a Stage-0 tangent escape geometry HTML report.")
+    parser = argparse.ArgumentParser(
+        description="Create a Tangent Escape sensor-geometry HTML report."
+    )
     parser.add_argument("csv", nargs="?", type=Path, help="Trace CSV. Defaults to latest compatible CSV.")
     parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR)
     parser.add_argument("--save", type=Path, help="Output HTML path.")

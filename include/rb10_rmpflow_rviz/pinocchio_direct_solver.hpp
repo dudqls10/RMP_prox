@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -59,6 +60,14 @@ private:
     Matrix6 & metric,
     JointVector & force);
 
+  static void accumulate_scalar_natural_leaf(
+    const RowVector6 & jacobian,
+    double metric_scalar,
+    double natural_force,
+    double curvature,
+    Matrix6 & metric,
+    JointVector & force);
+
   static void accumulate_vector_leaf(
     bool use_natural_rmp,
     const Eigen::MatrixXd & jacobian,
@@ -77,46 +86,99 @@ private:
   static Eigen::Vector3d axis_unit_vector(const std::string & axis_name);
   static Eigen::VectorXd flatten_control_points(const KinematicsContext & context);
   static Eigen::MatrixXd stack_control_point_jacobians(const KinematicsContext & context);
-  static constexpr std::size_t tangent_escape_softmax_candidate_count_ = 5;
+  static constexpr std::size_t tangent_escape_failure_memory_count_ = 4;
 
-  struct TangentEscapeGdsModeState
+  enum class TangentEscapeCanonicalPhase : int
   {
-    bool active{false};
-    Eigen::Vector3d origin{Eigen::Vector3d::Zero()};
-    Eigen::Vector3d tangent{Eigen::Vector3d::UnitX()};
-    Eigen::Vector3d obstacle_direction{Eigen::Vector3d::UnitX()};
-    double activation{0.0};
-    double branch_weight{0.0};
-    double goal_score{0.0};
-    double continuity_score{0.0};
-    double duplicate_risk{0.0};
-    double adjacent_risk{0.0};
-    double hold_bonus{0.0};
-    double blocked_penalty{0.0};
-    double base_score{0.0};
-    double score{0.0};
-    double metric_boost{1.0};
-    double accel_boost{1.0};
-    std::uint64_t generation{0};
-    int supervisor_mode{0};
-    bool hold_phase{false};
+    Off = 0,
+    Engage = 1,
+    Drive = 2,
+    ReleaseDriveDown = 3,
+    ReleaseBrake = 4,
+    ReleaseLambdaDown = 5,
+    ReselectDriveDown = 6,
+    ReselectBrake = 7,
+    ReselectLambdaDown = 8
   };
 
-  struct TangentEscapeSupervisorState
+  struct TangentEscapeFailureMemory
   {
-    bool active{false};
-    int mode{0};
-    std::size_t control_point_index{0};
-    std::size_t slot{0};
+    bool valid{false};
     Eigen::Vector3d tangent{Eigen::Vector3d::UnitX()};
-    double branch_age_s{0.0};
-    double hold_age_s{0.0};
-    double stuck_timer_s{0.0};
-    double recovery_timer_s{0.0};
-    double start_scalar_s{0.0};
-    double best_scalar_s{0.0};
-    double start_clearance{0.0};
-    double best_clearance{0.0};
+    double strength{0.0};
+  };
+
+  struct TangentEscapeClearanceRateState
+  {
+    std::size_t control_point_index{0};
+    std::int64_t obstacle_key{-1};
+    double previous_clearance{0.0};
+    double filtered_rate{0.0};
+    bool previous_clearance_valid{false};
+    bool seen_this_cycle{false};
+  };
+
+  struct TangentEscapeCanonicalState
+  {
+    TangentEscapeCanonicalPhase phase{TangentEscapeCanonicalPhase::Off};
+    bool active_pair_valid{false};
+    std::size_t control_point_index{0};
+    std::int64_t obstacle_key{-1};
+    bool pending_pair_valid{false};
+    std::size_t pending_control_point_index{0};
+    std::int64_t pending_obstacle_key{-1};
+    bool tangent_valid{false};
+    Eigen::Vector3d tangent{Eigen::Vector3d::UnitX()};
+    Eigen::Vector3d obstacle_direction_at_selection{Eigen::Vector3d::UnitX()};
+    bool pending_failure_memory{false};
+    bool force_direction_change{false};
+    int handoff_reason{0};
+    double current_score{-std::numeric_limits<double>::infinity()};
+    double z{0.0};
+    double lambda{0.0};
+    double drive_ramp{0.0};
+    double release_brake{0.0};
+    double desired_velocity{0.0};
+    double phase_elapsed_s{0.0};
+    double phase_start_lambda{0.0};
+    double phase_start_drive_ramp{0.0};
+    double phase_start_release_brake{0.0};
+    double active_age_s{0.0};
+    double previous_goal_error{0.0};
+    bool previous_goal_error_valid{false};
+    Eigen::Vector3d previous_goal{Eigen::Vector3d::Zero()};
+    bool previous_goal_valid{false};
+    double filtered_goal_progress{0.0};
+    double last_alpha_stuck{0.0};
+    double last_raw_activation{0.0};
+    double last_blockage{0.0};
+    double last_clearance{0.0};
+    double last_beta{0.0};
+    double command_distance{0.0};
+    double actual_distance{0.0};
+    double episode_start_sector_risk{0.0};
+    double last_sector_risk{0.0};
+    std::array<
+      TangentEscapeFailureMemory,
+      tangent_escape_failure_memory_count_> failure_memory{};
+    std::size_t failure_memory_cursor{0};
+    JointVector previous_qdd{JointVector::Zero()};
+    bool previous_qdd_valid{false};
+    std::uint64_t handoff_generation{0};
+    std::vector<TangentEscapeClearanceRateState> clearance_rate_states{};
+  };
+
+  struct EscapeEnergyCertificateState
+  {
+    bool initialized{false};
+    double tank_energy{0.0};
+    double positive_energy_integral{0.0};
+    double negative_energy_integral{0.0};
+    double net_energy_integral{0.0};
+    std::uint64_t sample_count{0};
+    bool previous_environment_valid{false};
+    std::unordered_map<std::string, Eigen::Vector3d> previous_vector_targets;
+    std::vector<ObstacleSphere> previous_obstacles;
   };
 
   static int infer_node_dim(
@@ -189,12 +251,57 @@ private:
     JointVector & force) const;
 
   void accumulate_tangent_escape(
+    const JointVector & q,
     const KinematicsContext & context,
     const NodeGeometry & geometry,
     const JointVector & qd,
     const Eigen::Vector3d & goal,
     const std::vector<ObstacleSphere> & obstacles,
     const JointVector & nominal_qdd,
+    Matrix6 & metric,
+    JointVector & force,
+    std::vector<double> * debug_data) const;
+
+  void accumulate_tangent_escape_canonical(
+    const JointVector & q,
+    const KinematicsContext & context,
+    const NodeGeometry & geometry,
+    const JointVector & qd,
+    const Eigen::Vector3d & goal,
+    const std::vector<ObstacleSphere> & obstacles,
+    const JointVector & nominal_qdd,
+    const Matrix6 & base_metric,
+    const JointVector & base_force,
+    Matrix6 & metric,
+    JointVector & force,
+    std::vector<double> * debug_data) const;
+
+  void accumulate_tangent_escape_risk_damped(
+    const JointVector & q,
+    const KinematicsContext & context,
+    const NodeGeometry & geometry,
+    const JointVector & qd,
+    const Eigen::Vector3d & goal,
+    const std::vector<ObstacleSphere> & obstacles,
+    const JointVector & nominal_qdd,
+    const Matrix6 & base_metric,
+    const JointVector & base_force,
+    Matrix6 & metric,
+    JointVector & force,
+    std::vector<double> * debug_data) const;
+
+  void accumulate_tangent_escape_impl(
+    TangentEscapeCanonicalState & state,
+    bool risk_damped_mode,
+    const JointVector & q,
+    const KinematicsContext & context,
+    const NodeGeometry & geometry,
+    const JointVector & qd,
+    const Eigen::Vector3d & goal,
+    const std::vector<ObstacleSphere> & obstacles,
+    const JointVector & nominal_qdd,
+    const Matrix6 & base_metric,
+    const JointVector & base_force,
     Matrix6 & metric,
     JointVector & force,
     std::vector<double> * debug_data) const;
@@ -233,17 +340,9 @@ private:
 
   EigenRmpConfig config_;
   std::shared_ptr<const PinocchioModel> model_;
-  mutable std::array<
-    TangentEscapeGdsModeState,
-    RB10Model::sensor_control_points.size()> tangent_escape_gds_modes_{};
-  mutable std::array<
-    std::array<TangentEscapeGdsModeState, tangent_escape_softmax_candidate_count_>,
-    RB10Model::sensor_control_points.size()> tangent_escape_softmax_gds_modes_{};
-  mutable TangentEscapeSupervisorState tangent_escape_supervisor_{};
-  mutable std::array<
-    std::array<double, tangent_escape_softmax_candidate_count_>,
-    RB10Model::sensor_control_points.size()> tangent_escape_blocked_memory_{};
-  mutable std::uint64_t tangent_escape_mode_generation_{0};
+  mutable TangentEscapeCanonicalState tangent_escape_canonical_state_{};
+  mutable TangentEscapeCanonicalState tangent_escape_risk_damped_state_{};
+  mutable EscapeEnergyCertificateState escape_energy_certificate_state_{};
   std::shared_ptr<const void> compiled_state_;
 };
 

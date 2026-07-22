@@ -315,6 +315,48 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /repulsion_metric_markers
       Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: TangentEscapeCanonical
+      Namespaces:
+        tangent_escape_cp_acceleration_angle: true
+        tangent_escape_cp_acceleration_with: true
+        tangent_escape_cp_acceleration_without: true
+        tangent_escape_delta_cp_acceleration: false
+        tangent_escape_geometry_collision_normal: false
+        tangent_escape_geometry_cp: false
+        tangent_escape_geometry_cp_obstacle: false
+        tangent_escape_geometry_cp_velocity: false
+        tangent_escape_geometry_labels: false
+        tangent_escape_geometry_obstacle: false
+        tangent_escape_geometry_obstacle_direction: false
+        tangent_escape_geometry_sensor_normal: false
+        tangent_escape_geometry_tangent_bias: false
+        tangent_escape_scalar_acceleration: false
+        tangent_escape_selected_cp: true
+        tangent_escape_selected_normal: false
+        tangent_escape_selected_status: true
+        tangent_escape_selected_tangent: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /tangent_escape_geometry_markers
+      Value: true
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: StabilityCertificate
+      Namespaces:
+        rmp_stability_certificate: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /rmp_stability_certificate_marker
+      Value: true
     - Class: rviz_default_plugins/Marker
       Enabled: true
       Name: TcpAccel

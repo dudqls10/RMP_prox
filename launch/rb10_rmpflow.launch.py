@@ -47,10 +47,6 @@ def generate_launch_description():
     use_obstacles = LaunchConfiguration("use_obstacles")
     use_proximity_bridge = LaunchConfiguration("use_proximity_bridge")
     proximity_surface_visualization = LaunchConfiguration("proximity_surface_visualization")
-    surface_patch_enabled = LaunchConfiguration("surface_patch_enabled")
-    surface_patch_collision_memory_enabled = LaunchConfiguration(
-        "surface_patch_collision_memory_enabled"
-    )
     record_data = LaunchConfiguration("record_data")
     auto_start_recording = LaunchConfiguration("auto_start_recording")
     recording_rate = LaunchConfiguration("recording_rate")
@@ -105,11 +101,7 @@ def generate_launch_description():
     rmpflow_trace_log_rate = LaunchConfiguration("rmpflow_trace_log_rate")
     rmpflow_trace_log_directory = LaunchConfiguration("rmpflow_trace_log_directory")
     rmpflow_trace_console_summary = LaunchConfiguration("rmpflow_trace_console_summary")
-    tangent_escape_rmp_leaf_mode = LaunchConfiguration("tangent_escape_rmp_leaf_mode")
-    tangent_escape_rmp_metric_scalar = LaunchConfiguration("tangent_escape_rmp_metric_scalar")
-    tangent_escape_rmp_position_gain = LaunchConfiguration("tangent_escape_rmp_position_gain")
-    tangent_escape_rmp_escape_length = LaunchConfiguration("tangent_escape_rmp_escape_length")
-    tangent_escape_rmp_softmax_beta = LaunchConfiguration("tangent_escape_rmp_softmax_beta")
+    enable_tangent_escape_rmp = LaunchConfiguration("enable_tangent_escape_rmp")
     publish_tangent_escape_rmp_data = LaunchConfiguration("publish_tangent_escape_rmp_data")
     publish_tangent_escape_geometry_debug = LaunchConfiguration("publish_tangent_escape_geometry_debug")
     record_joint_velocity = LaunchConfiguration("record_joint_velocity")
@@ -171,24 +163,9 @@ def generate_launch_description():
         "publish_debug_joint_state_sources": publish_debug_joint_state_sources,
         "publish_visualization": publish_visualization,
         "publish_rmp_ee_pose": publish_rmp_ee_pose,
-        "enable_tangent_escape_filter": False,
-        "enable_tangent_escape_rmp": False,
-        "tangent_escape_rmp_leaf_mode": tangent_escape_rmp_leaf_mode,
-        "tangent_escape_rmp_metric_scalar": ParameterValue(
-            tangent_escape_rmp_metric_scalar,
-            value_type=float,
-        ),
-        "tangent_escape_rmp_position_gain": ParameterValue(
-            tangent_escape_rmp_position_gain,
-            value_type=float,
-        ),
-        "tangent_escape_rmp_escape_length": ParameterValue(
-            tangent_escape_rmp_escape_length,
-            value_type=float,
-        ),
-        "tangent_escape_rmp_softmax_beta": ParameterValue(
-            tangent_escape_rmp_softmax_beta,
-            value_type=float,
+        "enable_tangent_escape_rmp": ParameterValue(
+            enable_tangent_escape_rmp,
+            value_type=bool,
         ),
         "publish_tangent_escape_rmp_data": ParameterValue(
             PythonExpression([
@@ -357,19 +334,6 @@ def generate_launch_description():
                 "surface_patch_fixed_visualization": ParameterValue(
                     PythonExpression([
                         'True if "', proximity_surface_visualization,
-                        '" == "true" else False'
-                    ]),
-                    value_type=bool,
-                ),
-                "surface_patch_enabled": ParameterValue(
-                    PythonExpression([
-                        'True if "', surface_patch_enabled, '" == "true" else False'
-                    ]),
-                    value_type=bool,
-                ),
-                "surface_patch_collision_memory_enabled": ParameterValue(
-                    PythonExpression([
-                        'True if "', surface_patch_collision_memory_enabled,
                         '" == "true" else False'
                     ]),
                     value_type=bool,
@@ -618,16 +582,6 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument(
-            "surface_patch_enabled",
-            default_value="true",
-            description="Publish live proximity surface patch markers into /obstacles.",
-        ),
-        DeclareLaunchArgument(
-            "surface_patch_collision_memory_enabled",
-            default_value="true",
-            description="Feed remembered proximity surface patches into /obstacles.",
-        ),
-        DeclareLaunchArgument(
             "bridge_publish_rate",
             default_value="500.0",
             description="RB10 state receive/publish rate in Hz before filtering.",
@@ -729,29 +683,12 @@ def generate_launch_description():
             description="Print one-line trace summaries to the launch terminal.",
         ),
         DeclareLaunchArgument(
-            "tangent_escape_rmp_leaf_mode",
-            default_value="softmax_gds",
-            description="Tangent escape RMP leaf mode: softmax_gds, gds, or direct_accel.",
-        ),
-        DeclareLaunchArgument(
-            "tangent_escape_rmp_metric_scalar",
-            default_value="150.0",
-            description="Metric scalar for the in-tree tangent escape RMP leaf.",
-        ),
-        DeclareLaunchArgument(
-            "tangent_escape_rmp_position_gain",
-            default_value="16.0",
-            description="GDS scalar tangent spring gain.",
-        ),
-        DeclareLaunchArgument(
-            "tangent_escape_rmp_escape_length",
-            default_value="0.06",
-            description="GDS scalar tangent target displacement in meters.",
-        ),
-        DeclareLaunchArgument(
-            "tangent_escape_rmp_softmax_beta",
-            default_value="4.0",
-            description="Stage-3 softmax inverse temperature for candidate branch weights.",
+            "enable_tangent_escape_rmp",
+            default_value="false",
+            description=(
+                "Enable the canonical tangent Escape leaf after validation. "
+                "Production default remains false."
+            ),
         ),
         DeclareLaunchArgument(
             "publish_tangent_escape_rmp_data",

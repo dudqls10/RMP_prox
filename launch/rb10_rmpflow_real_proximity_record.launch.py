@@ -79,8 +79,6 @@ def generate_launch_description():
                 "cb_simulation": "false",
                 "use_proximity_bridge": "true",
                 "proximity_surface_visualization": "false",
-                "surface_patch_enabled": "false",
-                "surface_patch_collision_memory_enabled": "false",
                 "use_interactive_goal": "false",
                 "use_rmp_goal_logger": "false",
                 "use_rmpflow_trace_logger": "false",

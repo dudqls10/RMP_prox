@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
-#include <optional>
 #include <stdexcept>
 
 #include "rb10_rmpflow_rviz/casadi_task_graph.hpp"
+#include "rb10_rmpflow_rviz/escape_energy_certificate.hpp"
+#include "rb10_rmpflow_rviz/joint_acceleration_limiter.hpp"
+#include "rb10_rmpflow_rviz/paper_gds_collision.hpp"
+#include "rb10_rmpflow_rviz/paper_gds_joint_limit.hpp"
 
 namespace rb10_rmpflow_rviz
 {
@@ -20,6 +22,69 @@ struct SolverImpl
   std::unordered_map<std::string, CompiledCasadiTaskMap> compiled_task_maps;
   std::vector<std::size_t> topo_indices;
 };
+
+enum class LeafAblationGroup : int
+{
+  CspaceTarget = 1,
+  JointLimits = 2,
+  JointVelocityCap = 3,
+  Target = 4,
+  Collision = 5,
+  TangentEscape = 6,
+  Damping = 7,
+  BodyTarget = 8,
+  AxisTargetX = 9,
+  AxisTargetY = 10,
+  AxisTargetZ = 11,
+  WristAxisTarget = 12,
+  External = 13,
+  Other = 99
+};
+
+int leaf_ablation_group_id(
+  const RmpNodeConfig & node,
+  const std::string & leaf_type)
+{
+  if (leaf_type == "cspace_target") {
+    return static_cast<int>(LeafAblationGroup::CspaceTarget);
+  }
+  if (leaf_type == "joint_limit") {
+    return static_cast<int>(LeafAblationGroup::JointLimits);
+  }
+  if (leaf_type == "joint_velocity_cap") {
+    return static_cast<int>(LeafAblationGroup::JointVelocityCap);
+  }
+  if (leaf_type == "target") {
+    return static_cast<int>(
+      node.name == "body_link4" ?
+      LeafAblationGroup::BodyTarget : LeafAblationGroup::Target);
+  }
+  if (leaf_type == "collision") {
+    return static_cast<int>(LeafAblationGroup::Collision);
+  }
+  if (leaf_type == "tangent_escape") {
+    return static_cast<int>(LeafAblationGroup::TangentEscape);
+  }
+  if (leaf_type == "damping") {
+    return static_cast<int>(LeafAblationGroup::Damping);
+  }
+  if (leaf_type == "axis_target") {
+    if (node.axis == "x") {
+      return static_cast<int>(LeafAblationGroup::AxisTargetX);
+    }
+    if (node.axis == "y") {
+      return static_cast<int>(LeafAblationGroup::AxisTargetY);
+    }
+    return static_cast<int>(LeafAblationGroup::AxisTargetZ);
+  }
+  if (leaf_type == "wrist_axis_target") {
+    return static_cast<int>(LeafAblationGroup::WristAxisTarget);
+  }
+  if (leaf_type == "external") {
+    return static_cast<int>(LeafAblationGroup::External);
+  }
+  return static_cast<int>(LeafAblationGroup::Other);
+}
 
 const SolverImpl & get_impl(const std::shared_ptr<const void> & state)
 {
@@ -155,40 +220,6 @@ bool body_obstacle_interacts_with_sensor_control_point(
   return false;
 }
 
-double smoothstep01(double value)
-{
-  const double t = std::clamp(value, 0.0, 1.0);
-  return t * t * (3.0 - 2.0 * t);
-}
-
-double tangent_escape_activation(
-  double clearance,
-  const TangentEscapeRmpParams & params)
-{
-  if (clearance >= params.influence_distance) {
-    return 0.0;
-  }
-  if (clearance <= params.safe_distance) {
-    return 1.0;
-  }
-
-  const double span = std::max(params.influence_distance - params.safe_distance, 1e-9);
-  const double normalized = (clearance - params.safe_distance) / span;
-  return 1.0 - smoothstep01(normalized);
-}
-
-double tangent_escape_blocking_activation(
-  double beta,
-  const TangentEscapeRmpParams & params)
-{
-  const double beta_on = std::clamp(
-    std::min(params.goal_block_beta_on, params.goal_block_beta_full), -1.0, 1.0);
-  const double beta_full = std::clamp(
-    std::max(params.goal_block_beta_on, params.goal_block_beta_full), -1.0, 1.0);
-  const double span = std::max(beta_full - beta_on, 1e-9);
-  return smoothstep01((beta - beta_on) / span);
-}
-
 bool is_nominal_motion_leaf_type(const std::string & leaf_type)
 {
   return leaf_type == "cspace_target" ||
@@ -200,249 +231,263 @@ bool is_nominal_motion_leaf_type(const std::string & leaf_type)
          leaf_type == "damping";
 }
 
-std::optional<Eigen::Vector3d> project_to_tangent_direction(
-  const Eigen::Vector3d & direction,
-  const Eigen::Vector3d & normal,
-  double min_tangent_norm)
+bool all_finite(std::initializer_list<double> values)
 {
-  if (!direction.allFinite()) {
-    return std::nullopt;
-  }
-
-  Eigen::Vector3d tangent = direction - direction.dot(normal) * normal;
-  const double tangent_norm = tangent.norm();
-  if (tangent_norm <= min_tangent_norm) {
-    return std::nullopt;
-  }
-  return tangent / tangent_norm;
+  return std::all_of(
+    values.begin(),
+    values.end(),
+    [](double value) {return std::isfinite(value);});
 }
 
-Eigen::Vector3d reproject_mode_tangent(
-  const Eigen::Vector3d & stored_tangent,
-  const Eigen::Vector3d & fallback_tangent,
-  const Eigen::Vector3d & normal,
-  double min_tangent_norm)
+bool target_leaf_has_constant_gds_metric(const TargetRmpParams & params)
 {
-  auto projected = project_to_tangent_direction(stored_tangent, normal, min_tangent_norm);
-  if (!projected.has_value()) {
-    projected = project_to_tangent_direction(fallback_tangent, normal, min_tangent_norm);
-  }
-  if (!projected.has_value()) {
-    return fallback_tangent;
-  }
-
-  Eigen::Vector3d tangent = projected.value();
-  if (fallback_tangent.allFinite() && tangent.dot(fallback_tangent) < 0.0) {
-    tangent = -tangent;
-  }
-  return tangent;
+  return
+    all_finite({
+      params.accel_p_gain,
+      params.accel_d_gain,
+      params.accel_norm_eps,
+      params.metric_alpha_length_scale,
+      params.min_metric_alpha,
+      params.max_metric_scalar,
+      params.min_metric_scalar,
+      params.proximity_metric_boost_scalar,
+      params.proximity_metric_boost_length_scale}) &&
+    params.min_metric_alpha == 1.0 &&
+    params.proximity_metric_boost_scalar == 1.0 &&
+    params.accel_norm_eps > 0.0 &&
+    params.metric_alpha_length_scale > 0.0 &&
+    params.proximity_metric_boost_length_scale > 0.0 &&
+    params.max_metric_scalar > 0.0 &&
+    params.min_metric_scalar >= 0.0 &&
+    params.accel_p_gain >= 0.0 &&
+    params.accel_d_gain >= 0.0;
 }
 
-double stable_log_cosh(double value)
+bool axis_leaf_has_constant_gds_metric(const AxisTargetParams & params)
 {
-  const double magnitude = std::abs(value);
-  return magnitude + std::log1p(std::exp(-2.0 * magnitude)) - std::log(2.0);
+  return
+    all_finite({
+      params.accel_p_gain,
+      params.accel_d_gain,
+      params.metric_scalar,
+      params.proximity_metric_boost_scalar,
+      params.proximity_metric_boost_length_scale}) &&
+    params.proximity_metric_boost_scalar == 1.0 &&
+    params.proximity_metric_boost_length_scale > 0.0 &&
+    params.metric_scalar >= 0.0 &&
+    params.accel_p_gain >= 0.0 &&
+    params.accel_d_gain >= 0.0;
 }
 
-double bounded_spring_acceleration(double error, double gain, double acceleration_limit)
+bool base_graph_has_structured_gds_form(const EigenRmpConfig & config)
 {
-  if (gain <= 0.0) {
-    return 0.0;
+  if (config.solve_offset != 0.0) {
+    return false;
   }
-  if (acceleration_limit <= 0.0) {
-    return gain * error;
-  }
-  return acceleration_limit * std::tanh(gain * error / acceleration_limit);
-}
-
-double bounded_spring_potential(
-  double error,
-  double gain,
-  double acceleration_limit,
-  double metric_scalar)
-{
-  if (gain <= 0.0 || metric_scalar <= 0.0) {
-    return 0.0;
-  }
-  if (acceleration_limit <= 0.0) {
-    return 0.5 * metric_scalar * gain * error * error;
-  }
-  const double scaled_error = gain * error / acceleration_limit;
-  return metric_scalar * acceleration_limit * acceleration_limit / gain *
-         stable_log_cosh(scaled_error);
-}
-
-struct TangentEscapeSoftmaxCandidate
-{
-  std::size_t slot{0};
-  Eigen::Vector3d direction{Eigen::Vector3d::UnitX()};
-  double goal_score{0.0};
-  double continuity_score{0.0};
-  double duplicate_risk{0.0};
-  double adjacent_risk{0.0};
-  double hold_bonus{0.0};
-  double blocked_penalty{0.0};
-  double stuck_bonus{0.0};
-  double base_score{0.0};
-  double score{0.0};
-  double weight{0.0};
-  double metric_scalar{0.0};
-  double metric_boost{1.0};
-  double accel_boost{1.0};
-  double scalar_s{0.0};
-  double scalar_target{0.0};
-  double scalar_velocity{0.0};
-  double scalar_error{0.0};
-  double desired_tangent_accel{0.0};
-  double clearance_rate{0.0};
-  double collision_accel{0.0};
-  double scaled_collision_accel{0.0};
-  double potential_energy{0.0};
-  double kinetic_energy{0.0};
-  double lyapunov_energy{0.0};
-  double damping_vdot{0.0};
-  std::uint64_t mode_generation{0};
-  bool weights_latched{false};
-  bool bounded_potential{false};
-  double mode_normal_dot_tangent{0.0};
-  Eigen::Vector3d origin{Eigen::Vector3d::Zero()};
-  Eigen::Vector3d applied_tangent{Eigen::Vector3d::UnitX()};
-};
-
-void add_unique_tangent_candidate(
-  std::vector<TangentEscapeSoftmaxCandidate> & candidates,
-  std::size_t slot,
-  const std::optional<Eigen::Vector3d> & direction,
-  double duplicate_dot_threshold = 0.985)
-{
-  if (!direction.has_value() || !direction->allFinite()) {
-    return;
-  }
-  for (const auto & candidate : candidates) {
-    // Opposite tangents are distinct escape branches; only drop near-identical directions.
-    if (candidate.direction.dot(direction.value()) >= duplicate_dot_threshold) {
-      return;
+  for (const auto & node : config.graph_nodes) {
+    if (!node.enabled) {
+      continue;
+    }
+    // The proof certificate accepts only task maps that are smooth on the
+    // configured operating domain.  In particular, generic abs/norm/
+    // normalize and division nodes need additional nonzero-domain metadata
+    // that the current graph schema does not provide.
+    const auto task_map_supported = [](const std::string & task_map_type) {
+        return
+          task_map_type == "cspace_target" ||
+          task_map_type == "identity" ||
+          task_map_type == "joint_limit" ||
+          task_map_type == "tcp_position" ||
+          task_map_type == "link_position" ||
+          task_map_type == "link_orientation_axis" ||
+          task_map_type == "control_points" ||
+          task_map_type == "collision_distance" ||
+          task_map_type == "affine" ||
+          task_map_type == "elem_multiply" ||
+          task_map_type == "sin" ||
+          task_map_type == "cos" ||
+          task_map_type == "tanh" ||
+          task_map_type == "square" ||
+          task_map_type == "sum" ||
+          task_map_type == "weighted_sum" ||
+          task_map_type == "difference" ||
+          task_map_type == "concat" ||
+          task_map_type == "slice";
+      };
+    if (!task_map_supported(node.task_map_type)) {
+      return false;
+    }
+    const auto leaf_attachment_supported =
+      [&node](const std::string & leaf_type) {
+        if (leaf_type == "cspace_target") {
+          return
+            node.task_map_type == "cspace_target" ||
+            node.task_map_type == "identity";
+        }
+        if (leaf_type == "joint_limit") {
+          return node.task_map_type == "joint_limit";
+        }
+        if (leaf_type == "collision") {
+          return node.task_map_type == "collision_distance";
+        }
+        if (leaf_type == "axis_target") {
+          return node.task_map_type == "link_orientation_axis";
+        }
+        return true;
+      };
+    if (
+      !leaf_attachment_supported(node.leaf_rmp_type) ||
+      !leaf_attachment_supported(node.handcrafted_leaf_rmp_type))
+    {
+      return false;
+    }
+    const auto leaf_supported = [&config](const std::string & leaf_type) {
+        if (leaf_type.empty() || leaf_type == "none" || leaf_type == "tangent_escape") {
+          return true;
+        }
+        if (leaf_type == "cspace_target") {
+          return
+            all_finite({
+              config.cspace_target.metric_scalar,
+              config.cspace_target.position_gain,
+              config.cspace_target.damping_gain,
+              config.cspace_target.robust_position_term_thresh,
+              config.cspace_target.inertia}) &&
+            config.cspace_target.metric_scalar + config.cspace_target.inertia > 0.0 &&
+            config.cspace_target.position_gain >= 0.0 &&
+            config.cspace_target.damping_gain >= 0.0 &&
+            config.cspace_target.robust_position_term_thresh >= 0.0;
+        }
+        if (leaf_type == "joint_limit") {
+          if (config.joint_limit.policy != "paper_gds") {
+            return false;
+          }
+          for (std::size_t joint = 0; joint < 6; ++joint) {
+            PaperGdsJointLimitConfig params;
+            params.lower =
+              config.joint_lower_limits[joint] +
+              config.joint_limit_buffers[joint];
+            params.upper =
+              config.joint_upper_limits[joint] -
+              config.joint_limit_buffers[joint];
+            params.center_fraction =
+              config.joint_limit.gds_center_fraction;
+            params.task_metric =
+              config.joint_limit.metric_scalar;
+            params.potential_gain =
+              config.joint_limit.metric_scalar *
+              config.joint_limit.accel_potential_gain;
+            params.damping =
+              config.joint_limit.metric_scalar *
+              config.joint_limit.accel_damper_gain;
+            params.boundary_epsilon =
+              config.joint_limit.gds_domain_epsilon;
+            if (!valid_paper_gds_joint_limit_config(params)) {
+              return false;
+            }
+          }
+          return true;
+        }
+        if (leaf_type == "target") {
+          return target_leaf_has_constant_gds_metric(config.target);
+        }
+        if (leaf_type == "axis_target") {
+          return axis_leaf_has_constant_gds_metric(config.axis_target);
+        }
+        if (leaf_type == "wrist_axis_target") {
+          // Its current implementation deliberately overwrites nonlinear
+          // task-map curvature with zero, so it is outside this certificate.
+          return false;
+        }
+        if (leaf_type == "collision") {
+          if (config.collision.policy != "paper_gds") {
+            return false;
+          }
+          paper_gds_collision::Params params;
+          params.metric_scalar = config.collision.metric_scalar;
+          params.metric_modulation_radius =
+            config.collision.metric_modulation_radius;
+          params.metric_exploder_std_dev =
+            config.collision.metric_exploder_std_dev;
+          params.metric_exploder_eps =
+            config.collision.metric_exploder_eps;
+          params.clearance_smoothing =
+            config.collision.gds_clearance_smoothing;
+          params.metric_velocity_floor =
+            config.collision.gds_metric_velocity_floor;
+          params.metric_velocity_scale =
+            config.collision.gds_metric_velocity_scale;
+          params.repulsion_gain = config.collision.repulsion_gain;
+          params.repulsion_std_dev =
+            config.collision.repulsion_std_dev;
+          params.damping_gain = config.collision.damping_gain;
+          params.damping_std_dev = config.collision.damping_std_dev;
+          params.damping_robustness_eps =
+            config.collision.damping_robustness_eps;
+          params.damping_velocity_scale =
+            config.collision.gds_damping_velocity_scale;
+          return paper_gds_collision::parameters_are_valid(params);
+        }
+        if (leaf_type == "damping") {
+          return
+            all_finite({
+              config.damping.metric_scalar,
+              config.damping.inertia,
+              config.damping.accel_d_gain}) &&
+            config.damping.metric_scalar == 0.0 &&
+            config.damping.inertia >= 0.0 &&
+            config.damping.accel_d_gain >= 0.0;
+        }
+        // The current velocity-cap and externally supplied canonical leaves
+        // do not expose the curvature/potential metadata required by the
+        // structured-GDS theorem.
+        return false;
+      };
+    if (
+      !leaf_supported(node.leaf_rmp_type) ||
+      !leaf_supported(node.handcrafted_leaf_rmp_type))
+    {
+      return false;
     }
   }
-
-  TangentEscapeSoftmaxCandidate candidate;
-  candidate.slot = slot;
-  candidate.direction = direction.value();
-  candidates.push_back(candidate);
+  return true;
 }
 
-std::optional<Eigen::Vector3d> horizontal_unit_direction(
-  const Eigen::Vector3d & direction,
-  double min_norm)
-{
-  if (!direction.allFinite()) {
-    return std::nullopt;
-  }
-
-  const Eigen::Vector3d horizontal =
-    direction - direction.dot(Eigen::Vector3d::UnitZ()) * Eigen::Vector3d::UnitZ();
-  const double norm = horizontal.norm();
-  if (norm <= min_norm) {
-    return std::nullopt;
-  }
-  return horizontal / norm;
-}
-
-double tangent_escape_predictive_duplicate_risk(
-  const TangentEscapeRmpParams & params,
-  const PinocchioDirectRmpSolver::NodeGeometry & geometry,
-  std::size_t active_point_index,
-  const Eigen::Vector3d & direction,
-  const Eigen::Vector3d & normal,
-  double active_detection)
+bool same_environment(
+  const std::unordered_map<std::string, Eigen::Vector3d> & previous_targets,
+  const std::unordered_map<std::string, Eigen::Vector3d> & current_targets,
+  const std::vector<ObstacleSphere> & previous_obstacles,
+  const std::vector<ObstacleSphere> & current_obstacles)
 {
   if (
-    active_point_index >= RB10Model::sensor_control_points.size() ||
-    geometry.x.size() < static_cast<Eigen::Index>(3 * (active_point_index + 1)) ||
-    active_detection <= 0.0)
+    previous_targets.size() != current_targets.size() ||
+    previous_obstacles.size() != current_obstacles.size())
   {
-    return 0.0;
+    return false;
   }
-
-  const auto successors = RB10Model::predictive_duplicate_successors(active_point_index);
-  const Eigen::Vector3d active_position =
-    geometry.x.segment<3>(static_cast<Eigen::Index>(3 * active_point_index));
-  const double min_alignment = std::clamp(params.duplicate_risk_min_alignment, 0.0, 1.0);
-  double risk = 0.0;
-  for (std::size_t offset = 0; offset < successors.count; ++offset) {
-    const std::size_t successor_index = successors.indices[offset];
+  for (const auto & target : current_targets) {
+    const auto previous = previous_targets.find(target.first);
     if (
-      successor_index >= RB10Model::sensor_control_points.size() ||
-      geometry.x.size() < static_cast<Eigen::Index>(3 * (successor_index + 1)))
+      previous == previous_targets.end() ||
+      (previous->second - target.second).norm() > 1e-12)
     {
-      continue;
+      return false;
     }
-
-    const Eigen::Vector3d successor_position =
-      geometry.x.segment<3>(static_cast<Eigen::Index>(3 * successor_index));
-    const auto tangent_axis = project_to_tangent_direction(
-      successor_position - active_position,
-      normal,
-      params.min_tangent_norm);
-    if (!tangent_axis.has_value()) {
-      continue;
-    }
-    const auto horizontal_axis = horizontal_unit_direction(
-      tangent_axis.value(),
-      params.min_tangent_norm);
-    if (!horizontal_axis.has_value()) {
-      continue;
-    }
-
-    const double toward_successor = std::max(0.0, direction.dot(horizontal_axis.value()));
-    if (toward_successor <= min_alignment) {
-      continue;
-    }
-    risk = std::max(risk, active_detection * toward_successor * toward_successor);
   }
-  return risk;
-}
-
-double tangent_escape_instantaneous_adjacent_risk(
-  const TangentEscapeRmpParams & params,
-  const PinocchioDirectRmpSolver::NodeGeometry & geometry,
-  std::size_t point_count,
-  std::size_t active_point_index,
-  const Eigen::Vector3d & direction,
-  const std::vector<ObstacleSphere> & obstacles)
-{
-  double risk = 0.0;
-  for (const auto & obstacle : obstacles) {
+  for (std::size_t index = 0; index < current_obstacles.size(); ++index) {
+    const auto & previous = previous_obstacles[index];
+    const auto & current = current_obstacles[index];
     if (
-      obstacle.radius <= 0.0 ||
-      !obstacle.center.allFinite() ||
-      obstacle.proximity_control_point_index < 0 ||
-      obstacle.proximity_control_point_index == static_cast<int>(active_point_index))
+      previous.source_id != current.source_id ||
+      previous.proximity_control_point_index !=
+      current.proximity_control_point_index ||
+      previous.radius != current.radius ||
+      (previous.center - current.center).norm() > 1e-12)
     {
-      continue;
+      return false;
     }
-
-    const auto other_index = static_cast<std::size_t>(obstacle.proximity_control_point_index);
-    if (other_index >= point_count) {
-      continue;
-    }
-
-    const Eigen::Vector3d other_cp =
-      geometry.x.segment<3>(static_cast<Eigen::Index>(3 * other_index));
-    const double other_radius = RB10Model::sensor_control_points[other_index].radius;
-    const Eigen::Vector3d delta = other_cp - obstacle.center;
-    const double center_distance = delta.norm();
-    if (center_distance <= 1e-9) {
-      continue;
-    }
-
-    const double clearance =
-      center_distance - (other_radius + obstacle.radius);
-    const double distance_risk = tangent_escape_activation(clearance, params);
-    const Eigen::Vector3d obstacle_direction = -delta / center_distance;
-    risk += distance_risk * std::max(0.0, direction.dot(obstacle_direction));
   }
-  return risk;
+  return true;
 }
 
 PinocchioDirectRmpSolver::JointVector resolve_root_direct(
@@ -495,8 +540,83 @@ PinocchioDirectRmpSolver::PinocchioDirectRmpSolver(
 : config_(std::move(config)),
   model_(std::make_shared<PinocchioModel>(urdf_path))
 {
-  if (config_.collision.policy != "repulsive") {
-    throw std::runtime_error("collision_policy must be repulsive");
+  if (
+    config_.collision.policy != "repulsive" &&
+    config_.collision.policy != "lula_canonical" &&
+    config_.collision.policy != "paper_gds")
+  {
+    throw std::runtime_error(
+            "collision_policy must be repulsive, lula_canonical, or paper_gds");
+  }
+  if (
+    config_.joint_limit.policy != "lula_canonical" &&
+    config_.joint_limit.policy != "paper_gds")
+  {
+    throw std::runtime_error(
+            "joint_limit_policy must be lula_canonical or paper_gds");
+  }
+  const auto & tangent_escape = config_.tangent_escape;
+  if (
+    tangent_escape.acceleration_model != "canonical_velocity" &&
+    tangent_escape.acceleration_model != "risk_damped")
+  {
+    throw std::runtime_error(
+            "tangent_escape acceleration_model must be canonical_velocity or risk_damped");
+  }
+  if (tangent_escape.enabled && tangent_escape.acceleration_model == "risk_damped") {
+    const bool finite =
+      std::isfinite(tangent_escape.metric_scalar) &&
+      std::isfinite(tangent_escape.clearance_margin) &&
+      std::isfinite(tangent_escape.safe_distance) &&
+      std::isfinite(tangent_escape.influence_distance) &&
+      std::isfinite(tangent_escape.max_accel) &&
+      std::isfinite(tangent_escape.max_speed) &&
+      std::isfinite(tangent_escape.control_dt) &&
+      std::isfinite(tangent_escape.handoff_duration) &&
+      std::isfinite(tangent_escape.risk_distance_gain) &&
+      std::isfinite(tangent_escape.risk_distance_scale) &&
+      std::isfinite(tangent_escape.risk_approach_gain) &&
+      std::isfinite(tangent_escape.risk_approach_distance_scale) &&
+      std::isfinite(tangent_escape.risk_approach_epsilon) &&
+      std::isfinite(tangent_escape.risk_velocity_gate_scale) &&
+      std::isfinite(tangent_escape.risk_clearance_rate_filter_time_constant) &&
+      std::isfinite(tangent_escape.risk_tangent_damping_gain);
+    if (
+      !finite ||
+      tangent_escape.metric_scalar < 0.0 ||
+      tangent_escape.clearance_margin < 0.0 ||
+      tangent_escape.safe_distance < 0.0 ||
+      tangent_escape.influence_distance <= tangent_escape.safe_distance ||
+      tangent_escape.max_accel <= 0.0 ||
+      tangent_escape.max_speed <= 0.0 ||
+      tangent_escape.control_dt <= 0.0 ||
+      tangent_escape.handoff_duration < 0.0 ||
+      tangent_escape.risk_distance_gain < 0.0 ||
+      tangent_escape.risk_distance_scale <= 0.0 ||
+      tangent_escape.risk_approach_gain < 0.0 ||
+      tangent_escape.risk_approach_distance_scale <= 0.0 ||
+      tangent_escape.risk_approach_epsilon <= 0.0 ||
+      tangent_escape.risk_velocity_gate_scale <= 0.0 ||
+      tangent_escape.risk_clearance_rate_filter_time_constant < 0.0 ||
+      tangent_escape.risk_tangent_damping_gain <= 0.0)
+    {
+      throw std::runtime_error("Invalid risk-damped Tangent Escape parameters");
+    }
+  }
+  const auto & energy = config_.escape_energy_certificate;
+  if (
+    !std::isfinite(energy.tank_capacity) ||
+    !std::isfinite(energy.initial_energy) ||
+    !std::isfinite(energy.control_dt) ||
+    !std::isfinite(energy.power_tolerance) ||
+    energy.tank_capacity < 0.0 ||
+    energy.initial_energy < 0.0 ||
+    energy.initial_energy > energy.tank_capacity ||
+    energy.control_dt <= 0.0 ||
+    energy.scale_search_iterations < 1 ||
+    energy.power_tolerance < 0.0)
+  {
+    throw std::runtime_error("Invalid Escape stability energy-certificate parameters");
   }
   auto impl = std::make_shared<SolverImpl>();
   impl->topo_indices = build_topological_order(config_);
@@ -569,49 +689,630 @@ RmpSolveResult PinocchioDirectRmpSolver::solve(
   }
   std::vector<double> tangent_escape_debug_data{0.0};
 
+  struct LeafRootContribution
+  {
+    Matrix6 metric{Matrix6::Zero()};
+    JointVector force{JointVector::Zero()};
+  };
+  std::unordered_map<int, LeafRootContribution> leaf_root_contributions;
+
+  const auto record_leaf_contribution =
+    [&](const RmpNodeConfig & node,
+      const std::string & leaf_type,
+      const Matrix6 & metric_before,
+      const JointVector & force_before) {
+      if (
+        !config_.enable_leaf_ablation_diagnostics ||
+        leaf_type.empty() || leaf_type == "none")
+      {
+        return;
+      }
+      const int group_id = leaf_ablation_group_id(node, leaf_type);
+      auto & contribution = leaf_root_contributions[group_id];
+      contribution.metric += metric - metric_before;
+      contribution.force += force - force_before;
+    };
+
+  const auto is_tangent_escape_leaf = [](const std::string & leaf_type) {
+      return leaf_type == "tangent_escape";
+    };
+
+  // Build the complete non-Escape root RMP first. Candidate Escape directions
+  // must be evaluated against the same M0/f0 that the final solve will use.
   for (const auto index : impl.topo_indices) {
     const auto & node = config_.graph_nodes[index];
     const auto & geometry = cache.at(node.name);
-    const auto accumulate_leaf = [&](const std::string & leaf_type) {
+      const auto accumulate_base_leaf = [&](const std::string & leaf_type) {
+        if (is_tangent_escape_leaf(leaf_type)) {
+          return;
+        }
+        const Matrix6 metric_before = metric;
+        const JointVector force_before = force;
         accumulate_leaf_type(
           leaf_type,
           node,
           geometry,
           qd,
-	          cache,
+          cache,
           context,
-	          vector_targets,
+          vector_targets,
           obstacles,
-	          external_rmps,
-	          nominal_qdd_ptr,
-	          metric,
+          external_rmps,
+          nominal_qdd_ptr,
+          metric,
           force,
           &tangent_escape_debug_data);
+        record_leaf_contribution(
+          node,
+          leaf_type,
+          metric_before,
+          force_before);
       };
-    accumulate_leaf(node.leaf_rmp_type);
-    accumulate_leaf(node.handcrafted_leaf_rmp_type);
+    accumulate_base_leaf(node.leaf_rmp_type);
+    accumulate_base_leaf(node.handcrafted_leaf_rmp_type);
   }
 
-  JointVector qdd = use_rmp2 ?
-    resolve_root_rmp2(metric, force, config_.solve_offset) :
-    resolve_root_direct(metric, force, config_.solve_offset);
+  const Matrix6 base_metric = metric;
+  const JointVector base_force = force;
 
-  return RmpSolveResult{qdd, metric, force, tangent_escape_debug_data};
+  std::size_t tangent_escape_leaf_count = 0;
+  for (const auto index : impl.topo_indices) {
+    const auto & node = config_.graph_nodes[index];
+    const auto & geometry = cache.at(node.name);
+    const auto accumulate_escape_leaf = [&](const std::string & leaf_type) {
+        if (!is_tangent_escape_leaf(leaf_type)) {
+          return;
+        }
+        ++tangent_escape_leaf_count;
+        if (tangent_escape_leaf_count > 1) {
+          throw std::runtime_error(
+                  "Only one tangent_escape leaf may be enabled at a time");
+        }
+        const Matrix6 metric_before = metric;
+        const JointVector force_before = force;
+        accumulate_leaf_type(
+          leaf_type,
+          node,
+          geometry,
+          qd,
+          cache,
+          context,
+          vector_targets,
+          obstacles,
+          external_rmps,
+          nominal_qdd_ptr,
+          metric,
+          force,
+          &tangent_escape_debug_data);
+        record_leaf_contribution(
+          node,
+          leaf_type,
+          metric_before,
+          force_before);
+      };
+    accumulate_escape_leaf(node.leaf_rmp_type);
+    accumulate_escape_leaf(node.handcrafted_leaf_rmp_type);
+  }
+
+  const Matrix6 requested_escape_metric = metric - base_metric;
+  const JointVector requested_escape_force = force - base_force;
+
+  struct ScaledEscapeSolve
+  {
+    Matrix6 metric{Matrix6::Zero()};
+    JointVector force{JointVector::Zero()};
+    JointVector raw_qdd{JointVector::Zero()};
+    JointVector command_qdd{JointVector::Zero()};
+    double escape_power{0.0};
+    double solve_power{0.0};
+    double clamp_power{0.0};
+  };
+
+  const auto solve_scaled_escape =
+    [&](double scale) {
+      ScaledEscapeSolve sample;
+      const double bounded_scale = std::clamp(scale, 0.0, 1.0);
+      const Matrix6 escape_metric =
+        bounded_scale * requested_escape_metric;
+      const JointVector escape_force =
+        bounded_scale * requested_escape_force;
+      sample.metric = base_metric + escape_metric;
+      sample.force = base_force + escape_force;
+      sample.raw_qdd = use_rmp2 ?
+        resolve_root_rmp2(sample.metric, sample.force, config_.solve_offset) :
+        resolve_root_direct(sample.metric, sample.force, config_.solve_offset);
+      sample.command_qdd = limit_joint_acceleration(
+        sample.raw_qdd,
+        config_.max_joint_accel,
+        config_.preserve_joint_accel_direction);
+      sample.escape_power =
+        qd.dot(escape_force - escape_metric * sample.command_qdd);
+      sample.solve_power =
+        qd.dot(sample.metric * sample.raw_qdd - sample.force);
+      sample.clamp_power =
+        qd.dot(sample.metric * (sample.command_qdd - sample.raw_qdd));
+      return sample;
+    };
+
+  auto & energy_state = escape_energy_certificate_state_;
+  const auto & energy_params = config_.escape_energy_certificate;
+  if (!energy_state.initialized) {
+    energy_state.initialized = true;
+    energy_state.tank_energy =
+      std::clamp(
+      energy_params.initial_energy,
+      0.0,
+      energy_params.tank_capacity);
+  }
+
+  const bool environment_static =
+    energy_state.previous_environment_valid &&
+    external_rmps.empty() &&
+    same_environment(
+    energy_state.previous_vector_targets,
+    vector_targets,
+    energy_state.previous_obstacles,
+    obstacles);
+  energy_state.previous_vector_targets = vector_targets;
+  energy_state.previous_obstacles = obstacles;
+  energy_state.previous_environment_valid = true;
+
+  const ScaledEscapeSolve requested_solve = solve_scaled_escape(1.0);
+  double escape_scale = 1.0;
+  ScaledEscapeSolve final_solve = requested_solve;
+
+  if (
+    energy_params.enabled &&
+    requested_solve.escape_power > 0.0)
+  {
+    const double positive_power_budget =
+      energy_state.tank_energy /
+      std::max(energy_params.control_dt, 1e-12);
+    if (
+      requested_solve.escape_power >
+      positive_power_budget)
+    {
+      double feasible_scale = 0.0;
+      double infeasible_scale = 1.0;
+      for (
+        int iteration = 0;
+        iteration < energy_params.scale_search_iterations;
+        ++iteration)
+      {
+        const double trial_scale =
+          0.5 * (feasible_scale + infeasible_scale);
+        const auto trial = solve_scaled_escape(trial_scale);
+        if (
+          trial.escape_power <=
+          positive_power_budget)
+        {
+          feasible_scale = trial_scale;
+        } else {
+          infeasible_scale = trial_scale;
+        }
+      }
+      escape_scale = feasible_scale;
+      final_solve = solve_scaled_escape(escape_scale);
+      const double required_energy =
+        energy_params.control_dt *
+        std::max(final_solve.escape_power, 0.0);
+      if (
+        !std::isfinite(required_energy) ||
+        required_energy > energy_state.tank_energy)
+      {
+        escape_scale = 0.0;
+        final_solve = solve_scaled_escape(0.0);
+      }
+    }
+  }
+
+  metric = final_solve.metric;
+  force = final_solve.force;
+  const JointVector qdd = final_solve.raw_qdd;
+  if (config_.enable_leaf_ablation_diagnostics) {
+    const int escape_group_id = static_cast<int>(LeafAblationGroup::TangentEscape);
+    const auto escape_contribution = leaf_root_contributions.find(escape_group_id);
+    if (escape_contribution != leaf_root_contributions.end()) {
+      escape_contribution->second.metric *= escape_scale;
+      escape_contribution->second.force *= escape_scale;
+    }
+  }
+
+  const double dt = energy_params.control_dt;
+  const double positive_escape_energy =
+    dt * std::max(final_solve.escape_power, 0.0);
+  const double negative_escape_energy =
+    dt * std::max(-final_solve.escape_power, 0.0);
+  if (energy_params.enabled) {
+    energy_state.tank_energy = std::clamp(
+      energy_state.tank_energy - positive_escape_energy,
+      0.0,
+      energy_params.tank_capacity);
+  }
+  energy_state.positive_energy_integral += positive_escape_energy;
+  energy_state.negative_energy_integral += negative_escape_energy;
+  energy_state.net_energy_integral += dt * final_solve.escape_power;
+  ++energy_state.sample_count;
+
+  const ScaledEscapeSolve no_escape_solve = solve_scaled_escape(0.0);
+  bool base_domain_valid =
+    q.allFinite() &&
+    qd.allFinite() &&
+    base_metric.allFinite() &&
+    base_force.allFinite();
+  for (const auto & target : vector_targets) {
+    base_domain_valid =
+      base_domain_valid && target.second.allFinite();
+  }
+  for (const auto & obstacle : obstacles) {
+    base_domain_valid =
+      base_domain_valid &&
+      obstacle.center.allFinite() &&
+      std::isfinite(obstacle.radius) &&
+      obstacle.radius >= 0.0;
+  }
+  for (const auto & entry : cache) {
+    const auto & geometry = entry.second;
+    base_domain_valid =
+      base_domain_valid &&
+      geometry.x.allFinite() &&
+      geometry.jacobian.allFinite() &&
+      geometry.velocity.allFinite() &&
+      geometry.curvature.allFinite();
+  }
+  if (config_.collision.policy == "paper_gds") {
+    for (const auto & point : context.control_points) {
+      for (const auto & obstacle : obstacles) {
+        if ((point.position - obstacle.center).norm() <= 1e-9) {
+          base_domain_valid = false;
+        }
+      }
+    }
+  }
+  for (const auto & node : config_.graph_nodes) {
+    if (
+      !node.enabled ||
+      (
+        node.leaf_rmp_type != "axis_target" &&
+        node.handcrafted_leaf_rmp_type != "axis_target"))
+    {
+      continue;
+    }
+    const auto geometry = cache.find(node.name);
+    const auto target = vector_targets.find(node.target_key);
+    if (
+      geometry == cache.end() ||
+      geometry->second.x.norm() <= 1e-9 ||
+      target == vector_targets.end() ||
+      target->second.norm() <= 1e-9)
+    {
+      base_domain_valid = false;
+    }
+  }
+  const Matrix6 symmetric_base_metric =
+    0.5 * (base_metric + base_metric.transpose());
+  Eigen::SelfAdjointEigenSolver<Matrix6> base_metric_eigensolver;
+  if (symmetric_base_metric.allFinite()) {
+    base_metric_eigensolver.compute(
+      symmetric_base_metric,
+      Eigen::EigenvaluesOnly);
+  }
+  const bool base_metric_spd =
+    base_metric.allFinite() &&
+    base_metric.isApprox(base_metric.transpose(), 1e-10) &&
+    base_metric_eigensolver.info() == Eigen::Success &&
+    base_metric_eigensolver.eigenvalues().minCoeff() >
+    1e-12 * std::max(
+    1.0,
+    base_metric_eigensolver.eigenvalues().maxCoeff());
+  const double base_solve_residual =
+    (base_metric * no_escape_solve.raw_qdd - base_force).norm();
+  const bool base_solve_valid =
+    no_escape_solve.raw_qdd.allFinite() &&
+    std::isfinite(base_solve_residual) &&
+    base_solve_residual <= 1e-8 * (1.0 + base_force.norm());
+  const bool base_config_profile_valid =
+    base_graph_has_structured_gds_form(config_);
+  const bool base_gds_structural =
+    base_config_profile_valid &&
+    base_domain_valid &&
+    base_metric_spd &&
+    base_solve_valid;
+  const double numerical_power =
+    final_solve.solve_power + final_solve.clamp_power;
+  // When the tank is enabled, its update cancels positive Escape power in
+  // the composite storage.  Without the tank, retain the uncovered positive
+  // part explicitly instead of silently spending the numerical tolerance
+  // twice.
+  const double conditional_nonincrease_upper_bound =
+    numerical_power +
+    (
+      energy_params.enabled ?
+      0.0 :
+      std::max(final_solve.escape_power, 0.0));
+  const bool conditional_nonincrease_certificate =
+    base_gds_structural &&
+    environment_static &&
+    external_rmps.empty() &&
+    conditional_nonincrease_upper_bound <= energy_params.power_tolerance;
+  const bool clamp_active =
+    (final_solve.command_qdd - final_solve.raw_qdd).norm() > 1e-12;
+  const double tank_spent =
+    energy_params.initial_energy - energy_state.tank_energy;
+  const double guarded_energy_residual =
+    energy_params.enabled ?
+    tank_spent - energy_state.positive_energy_integral :
+    0.0;
+  const double guarded_energy_violation =
+    energy_params.enabled ?
+    std::max(
+      energy_state.positive_energy_integral -
+      energy_params.initial_energy,
+      0.0) :
+    0.0;
+
+  // Schema v1.  The accompanying proof document gives the exact field map.
+  const std::vector<double> stability_certificate_data{
+    1.0,
+    base_gds_structural ? 1.0 : 0.0,
+    environment_static ? 1.0 : 0.0,
+    external_rmps.empty() ? 1.0 : 0.0,
+    energy_params.enabled ? 1.0 : 0.0,
+    conditional_nonincrease_certificate ? 1.0 : 0.0,
+    escape_scale,
+    energy_state.tank_energy,
+    energy_params.tank_capacity,
+    requested_solve.escape_power,
+    final_solve.escape_power,
+    final_solve.solve_power,
+    final_solve.clamp_power,
+    numerical_power,
+    energy_state.positive_energy_integral,
+    energy_state.negative_energy_integral,
+    energy_state.net_energy_integral,
+    static_cast<double>(energy_state.sample_count),
+    requested_escape_metric.trace(),
+    (escape_scale * requested_escape_metric).trace(),
+    requested_escape_force.norm(),
+    (escape_scale * requested_escape_force).norm(),
+    final_solve.raw_qdd.norm(),
+    final_solve.command_qdd.norm(),
+    clamp_active ? 1.0 : 0.0,
+    config_.solve_offset,
+    requested_escape_metric.norm() > 1e-12 ? 1.0 : 0.0,
+    guarded_energy_residual,
+    guarded_energy_violation,
+    conditional_nonincrease_upper_bound,
+    energy_params.initial_energy,
+    base_config_profile_valid ? 1.0 : 0.0,
+    base_domain_valid ? 1.0 : 0.0,
+    base_metric_spd ? 1.0 : 0.0,
+    base_solve_valid ? 1.0 : 0.0
+  };
+
+  // Same-state counterfactual data.  This is computed from the already-built
+  // base M0/f0, so it does not repeat FK, graph pushforward, or leaf
+  // evaluation and it does not advance the hybrid Escape supervisor.
+  std::vector<double> tangent_escape_dual_solve_data(43, 0.0);
+  const bool escape_contribution_active =
+    requested_escape_metric.norm() > 1e-12 ||
+    requested_escape_force.norm() > 1e-12;
+  tangent_escape_dual_solve_data[0] =
+    escape_contribution_active ? 1.0 : 0.0;
+  for (int index = 0; index < 6; ++index) {
+    tangent_escape_dual_solve_data[1 + index] =
+      final_solve.command_qdd[index];
+    tangent_escape_dual_solve_data[7 + index] =
+      no_escape_solve.command_qdd[index];
+    tangent_escape_dual_solve_data[13 + index] =
+      final_solve.command_qdd[index] - no_escape_solve.command_qdd[index];
+  }
+
+  const Eigen::Vector3d tcp_accel_with =
+    context.tcp_jacobian * final_solve.command_qdd + context.tcp_curvature;
+  const Eigen::Vector3d tcp_accel_without =
+    context.tcp_jacobian * no_escape_solve.command_qdd + context.tcp_curvature;
+  const Eigen::Vector3d delta_tcp_accel =
+    tcp_accel_with - tcp_accel_without;
+  for (int axis = 0; axis < 3; ++axis) {
+    tangent_escape_dual_solve_data[19 + axis] = tcp_accel_with[axis];
+    tangent_escape_dual_solve_data[22 + axis] = tcp_accel_without[axis];
+    tangent_escape_dual_solve_data[25 + axis] = delta_tcp_accel[axis];
+  }
+
+  if (tangent_escape_debug_data.size() >= 23) {
+    const int point_index = static_cast<int>(
+      std::llround(tangent_escape_debug_data[1]));
+    Eigen::Vector3d normal{
+      tangent_escape_debug_data[17],
+      tangent_escape_debug_data[18],
+      tangent_escape_debug_data[19]};
+    Eigen::Vector3d tangent{
+      tangent_escape_debug_data[20],
+      tangent_escape_debug_data[21],
+      tangent_escape_debug_data[22]};
+    if (normal.norm() > 1e-12) {
+      normal.normalize();
+    }
+    if (tangent.norm() > 1e-12) {
+      tangent.normalize();
+    }
+    tangent_escape_dual_solve_data[28] = delta_tcp_accel.dot(tangent);
+    tangent_escape_dual_solve_data[29] = delta_tcp_accel.dot(normal);
+    if (tangent_escape_debug_data.size() > 10) {
+      tangent_escape_dual_solve_data[30] = tangent_escape_debug_data[6];
+      tangent_escape_dual_solve_data[31] =
+        escape_scale * tangent_escape_debug_data[10];
+    }
+    if (
+      point_index >= 0 &&
+      static_cast<std::size_t>(point_index) <
+      context.control_point_jacobians.size() &&
+      static_cast<std::size_t>(point_index) <
+      context.control_point_curvatures.size())
+    {
+      const auto cp_index = static_cast<std::size_t>(point_index);
+      const Eigen::Vector3d cp_accel_with =
+        context.control_point_jacobians[cp_index] *
+        final_solve.command_qdd +
+        context.control_point_curvatures[cp_index];
+      const Eigen::Vector3d cp_accel_without =
+        context.control_point_jacobians[cp_index] *
+        no_escape_solve.command_qdd +
+        context.control_point_curvatures[cp_index];
+      const Eigen::Vector3d delta_cp_accel =
+        cp_accel_with - cp_accel_without;
+      for (int axis = 0; axis < 3; ++axis) {
+        tangent_escape_dual_solve_data[32 + axis] = cp_accel_with[axis];
+        tangent_escape_dual_solve_data[35 + axis] = cp_accel_without[axis];
+        tangent_escape_dual_solve_data[38 + axis] = delta_cp_accel[axis];
+      }
+      tangent_escape_dual_solve_data[41] = delta_cp_accel.dot(tangent);
+      tangent_escape_dual_solve_data[42] = delta_cp_accel.dot(normal);
+    }
+  }
+
+  if (config_.tangent_escape.enabled) {
+    auto & escape_state =
+      config_.tangent_escape.acceleration_model == "risk_damped" ?
+      tangent_escape_risk_damped_state_ :
+      tangent_escape_canonical_state_;
+    escape_state.previous_qdd = qdd;
+    escape_state.previous_qdd_valid = true;
+  }
+
+  std::vector<double> leaf_ablation_data{0.0};
+  if (config_.enable_leaf_ablation_diagnostics) {
+    // Schema v1 header (25 values): version, record count, acceleration
+    // limit, raw/command norms, direction cosine, saturation count, then
+    // raw qdd[6], command qdd[6], and command-minus-raw qdd[6].  Each
+    // 17-value record contains group id, active flag, metric trace/norm,
+    // force norm, delta raw qdd[6], and delta command qdd[6].
+    constexpr double active_tolerance = 1e-12;
+    constexpr std::size_t header_size = 25;
+    constexpr std::size_t record_size = 17;
+    std::vector<int> group_ids;
+    group_ids.reserve(leaf_root_contributions.size());
+    for (const auto & entry : leaf_root_contributions) {
+      group_ids.push_back(entry.first);
+    }
+    std::sort(group_ids.begin(), group_ids.end());
+
+    const JointVector & raw_qdd = final_solve.raw_qdd;
+    const JointVector & command_qdd = final_solve.command_qdd;
+    const double raw_norm = raw_qdd.norm();
+    const double command_norm = command_qdd.norm();
+    double direction_cosine = 1.0;
+    if (raw_norm > active_tolerance && command_norm > active_tolerance) {
+      direction_cosine = std::clamp(
+        raw_qdd.dot(command_qdd) / (raw_norm * command_norm),
+        -1.0,
+        1.0);
+    }
+    int saturated_joint_count = 0;
+    for (int joint = 0; joint < 6; ++joint) {
+      if (std::abs(raw_qdd[joint]) > config_.max_joint_accel + active_tolerance) {
+        ++saturated_joint_count;
+      }
+    }
+
+    leaf_ablation_data.clear();
+    leaf_ablation_data.reserve(
+      header_size + record_size * group_ids.size());
+    leaf_ablation_data.push_back(1.0);
+    leaf_ablation_data.push_back(static_cast<double>(group_ids.size()));
+    leaf_ablation_data.push_back(config_.max_joint_accel);
+    leaf_ablation_data.push_back(raw_norm);
+    leaf_ablation_data.push_back(command_norm);
+    leaf_ablation_data.push_back(direction_cosine);
+    leaf_ablation_data.push_back(static_cast<double>(saturated_joint_count));
+    for (int joint = 0; joint < 6; ++joint) {
+      leaf_ablation_data.push_back(raw_qdd[joint]);
+    }
+    for (int joint = 0; joint < 6; ++joint) {
+      leaf_ablation_data.push_back(command_qdd[joint]);
+    }
+    for (int joint = 0; joint < 6; ++joint) {
+      leaf_ablation_data.push_back(command_qdd[joint] - raw_qdd[joint]);
+    }
+
+    for (const int group_id : group_ids) {
+      const auto & contribution = leaf_root_contributions.at(group_id);
+      const Matrix6 without_metric = metric - contribution.metric;
+      const JointVector without_force = force - contribution.force;
+      const JointVector without_raw_qdd = use_rmp2 ?
+        resolve_root_rmp2(without_metric, without_force, config_.solve_offset) :
+        resolve_root_direct(without_metric, without_force, config_.solve_offset);
+      const JointVector without_command_qdd = limit_joint_acceleration(
+        without_raw_qdd,
+        config_.max_joint_accel,
+        config_.preserve_joint_accel_direction);
+      const JointVector delta_raw_qdd = raw_qdd - without_raw_qdd;
+      const JointVector delta_command_qdd = command_qdd - without_command_qdd;
+      const bool active =
+        contribution.metric.norm() > active_tolerance ||
+        contribution.force.norm() > active_tolerance;
+
+      leaf_ablation_data.push_back(static_cast<double>(group_id));
+      leaf_ablation_data.push_back(active ? 1.0 : 0.0);
+      leaf_ablation_data.push_back(contribution.metric.trace());
+      leaf_ablation_data.push_back(contribution.metric.norm());
+      leaf_ablation_data.push_back(contribution.force.norm());
+      for (int joint = 0; joint < 6; ++joint) {
+        leaf_ablation_data.push_back(delta_raw_qdd[joint]);
+      }
+      for (int joint = 0; joint < 6; ++joint) {
+        leaf_ablation_data.push_back(delta_command_qdd[joint]);
+      }
+    }
+  }
+
+  RmpSolveResult result;
+  result.qdd = qdd;
+  result.metric = metric;
+  result.force = force;
+  result.tangent_escape_rmp_data = std::move(tangent_escape_debug_data);
+  result.tangent_escape_dual_solve_data =
+    std::move(tangent_escape_dual_solve_data);
+  result.leaf_ablation_data = std::move(leaf_ablation_data);
+  result.stability_certificate_data = stability_certificate_data;
+  return result;
 }
 
 std::vector<RmpSolveResult> PinocchioDirectRmpSolver::solve_batch(
   const std::vector<RmpBatchInput> & batch_inputs) const
 {
+  const auto canonical_snapshot = tangent_escape_canonical_state_;
+  const auto risk_damped_snapshot = tangent_escape_risk_damped_state_;
+  const auto energy_snapshot = escape_energy_certificate_state_;
+  const auto restore_state = [
+      this,
+      &canonical_snapshot,
+      &risk_damped_snapshot,
+      &energy_snapshot]() {
+      tangent_escape_canonical_state_ = canonical_snapshot;
+      tangent_escape_risk_damped_state_ = risk_damped_snapshot;
+      escape_energy_certificate_state_ = energy_snapshot;
+    };
+
   std::vector<RmpSolveResult> results;
   results.reserve(batch_inputs.size());
-  for (const auto & input : batch_inputs) {
-    results.push_back(solve(
-        input.q,
-        input.qd,
-        input.vector_targets,
-        input.obstacles,
-        input.external_rmps));
+  try {
+    for (const auto & input : batch_inputs) {
+      restore_state();
+      results.push_back(solve(
+          input.q,
+          input.qd,
+          input.vector_targets,
+          input.obstacles,
+          input.external_rmps));
+    }
+  } catch (...) {
+    restore_state();
+    throw;
   }
+
+  restore_state();
   return results;
 }
 
@@ -946,6 +1647,8 @@ PinocchioDirectRmpSolver::NodeGeometry PinocchioDirectRmpSolver::evaluate_native
     std::vector<double> curvatures;
     std::vector<Eigen::RowVectorXd> jacobians;
     const auto & collision_params = config_.collision;
+    const bool use_signed_collision_task =
+      collision_params.policy == "paper_gds";
     xs.reserve(static_cast<std::size_t>(
       num_control_points * (static_cast<int>(obstacles.size()) + (config_.body_obstacles.empty() ? 0 : 1))));
     velocities.reserve(xs.capacity());
@@ -977,12 +1680,14 @@ PinocchioDirectRmpSolver::NodeGeometry PinocchioDirectRmpSolver::evaluate_native
         const double center_distance = std::max(delta.norm(), 1e-9);
         const double signed_distance =
           center_distance - (point_radius + obstacle.radius) - collision_params.margin;
-        const double x = std::max(signed_distance, 0.0);
+        const double x = use_signed_collision_task ?
+          signed_distance :
+          std::max(signed_distance, 0.0);
         const Eigen::RowVectorXd jacobian =
           (delta / center_distance).transpose() * point_jacobian;
         const double velocity = (delta / center_distance).dot(point_velocity);
         double curvature = 0.0;
-        if (signed_distance > 0.0) {
+        if (use_signed_collision_task || signed_distance > 0.0) {
           const Eigen::Matrix3d projector =
             (Eigen::Matrix3d::Identity() -
             (delta / center_distance) * (delta / center_distance).transpose()) /
@@ -994,7 +1699,7 @@ PinocchioDirectRmpSolver::NodeGeometry PinocchioDirectRmpSolver::evaluate_native
         append_term(
           x,
           jacobian,
-          signed_distance > 0.0 ? velocity : 0.0,
+          (use_signed_collision_task || signed_distance > 0.0) ? velocity : 0.0,
           curvature);
       }
 
@@ -1022,12 +1727,14 @@ PinocchioDirectRmpSolver::NodeGeometry PinocchioDirectRmpSolver::evaluate_native
           const double center_distance = std::max(delta.norm(), 1e-9);
           const double signed_distance =
             center_distance - (point_radius + obstacle.radius) - collision_params.margin;
-          const double x = std::max(signed_distance, 0.0);
+          const double x = use_signed_collision_task ?
+            signed_distance :
+            std::max(signed_distance, 0.0);
           const Eigen::RowVectorXd jacobian =
             (delta / center_distance).transpose() * point_jacobian;
           const double velocity = (delta / center_distance).dot(point_velocity);
           double curvature = 0.0;
-          if (signed_distance > 0.0) {
+          if (use_signed_collision_task || signed_distance > 0.0) {
             const Eigen::Matrix3d projector =
               (Eigen::Matrix3d::Identity() -
               (delta / center_distance) * (delta / center_distance).transpose()) /
@@ -1041,7 +1748,8 @@ PinocchioDirectRmpSolver::NodeGeometry PinocchioDirectRmpSolver::evaluate_native
             best_signed_distance = signed_distance;
             best_x = x;
             best_jacobian = jacobian;
-            best_velocity = signed_distance > 0.0 ? velocity : 0.0;
+            best_velocity =
+              (use_signed_collision_task || signed_distance > 0.0) ? velocity : 0.0;
             best_curvature = curvature;
           }
         } else if (obstacle.type == "box") {
@@ -1064,7 +1772,9 @@ PinocchioDirectRmpSolver::NodeGeometry PinocchioDirectRmpSolver::evaluate_native
           const double outside_distance = delta.norm();
           const double signed_distance =
             outside_distance - point_radius - collision_params.margin;
-          const double x = std::max(signed_distance, 0.0);
+          const double x = use_signed_collision_task ?
+            signed_distance :
+            std::max(signed_distance, 0.0);
           Eigen::Vector3d grad_local = Eigen::Vector3d::Zero();
           if (outside_distance > 1e-9) {
             grad_local = delta / outside_distance;
@@ -1094,8 +1804,10 @@ PinocchioDirectRmpSolver::NodeGeometry PinocchioDirectRmpSolver::evaluate_native
             best_signed_distance = signed_distance;
             best_x = x;
             best_jacobian = jacobian;
-            best_velocity = signed_distance > 0.0 ? velocity : 0.0;
-            best_curvature = signed_distance > 0.0 ? curvature : 0.0;
+            best_velocity =
+              (use_signed_collision_task || signed_distance > 0.0) ? velocity : 0.0;
+            best_curvature =
+              (use_signed_collision_task || signed_distance > 0.0) ? curvature : 0.0;
           }
         } else {
           throw std::runtime_error("Unsupported body obstacle type: " + obstacle.type);
@@ -1184,6 +1896,21 @@ void PinocchioDirectRmpSolver::accumulate_scalar_leaf(
   } else {
     force += jacobian.transpose() * (metric_scalar * (acceleration - curvature));
   }
+}
+
+void PinocchioDirectRmpSolver::accumulate_scalar_natural_leaf(
+  const RowVector6 & jacobian,
+  double metric_scalar,
+  double natural_force,
+  double curvature,
+  Matrix6 & metric,
+  JointVector & force)
+{
+  metric.noalias() +=
+    jacobian.transpose() * metric_scalar * jacobian;
+  force.noalias() +=
+    jacobian.transpose() *
+    (natural_force - metric_scalar * curvature);
 }
 
 void PinocchioDirectRmpSolver::accumulate_vector_leaf(
@@ -1348,7 +2075,13 @@ void PinocchioDirectRmpSolver::accumulate_leaf_type(
   if (leaf_type == "tangent_escape") {
     const auto target_it = vector_targets.find(node.target_key);
     if (target_it != vector_targets.end() && nominal_qdd != nullptr) {
+      const auto root_it = cache.find("root");
+      if (root_it == cache.end() || root_it->second.x.size() != 6) {
+        throw std::runtime_error("tangent_escape requires the six-dimensional root state");
+      }
+      const JointVector q = root_it->second.x.head<6>();
       accumulate_tangent_escape(
+        q,
         context,
         geometry,
         qd,
@@ -1455,8 +2188,74 @@ void PinocchioDirectRmpSolver::accumulate_joint_limits(
   Matrix6 & metric,
   JointVector & force) const
 {
-  const bool use_natural_rmp = uses_rmp2_solve() && uses_natural_rmp();
   const auto velocity = velocity_of(geometry, qd);
+  if (config_.joint_limit.policy == "paper_gds") {
+    if (geometry.x.size() != 12 || geometry.jacobian.rows() != 12) {
+      throw std::runtime_error(
+              "paper_gds joint-limit leaf expects six upper/lower clearance pairs");
+    }
+    for (int joint = 0; joint < 6; ++joint) {
+      const Eigen::Index upper_row = 2 * joint;
+      const Eigen::Index lower_row = upper_row + 1;
+      const double lower =
+        config_.joint_lower_limits[static_cast<std::size_t>(joint)] +
+        config_.joint_limit_buffers[static_cast<std::size_t>(joint)];
+      const double upper =
+        config_.joint_upper_limits[static_cast<std::size_t>(joint)] -
+        config_.joint_limit_buffers[static_cast<std::size_t>(joint)];
+      PaperGdsJointLimitConfig params;
+      params.lower = lower;
+      params.upper = upper;
+      params.center_fraction =
+        config_.joint_limit.gds_center_fraction;
+      params.task_metric =
+        config_.joint_limit.metric_scalar;
+      // Preserve the YAML gains as task-acceleration gains.  The structured
+      // GDS helper takes potential and damping *force* coefficients.
+      params.potential_gain =
+        config_.joint_limit.metric_scalar *
+        config_.joint_limit.accel_potential_gain;
+      params.damping =
+        config_.joint_limit.metric_scalar *
+        config_.joint_limit.accel_damper_gain;
+      params.boundary_epsilon =
+        config_.joint_limit.gds_domain_epsilon;
+
+      const double q_value = lower + geometry.x[lower_row];
+      const double q_rate = velocity[lower_row];
+      const auto leaf =
+        evaluate_paper_gds_joint_limit(params, q_value, q_rate);
+      if (!leaf.valid) {
+        throw std::runtime_error(
+                "paper_gds joint-limit task left its open numerical domain at joint " +
+                std::to_string(joint));
+      }
+
+      const double lower_clearance = geometry.x[lower_row];
+      const double upper_clearance = geometry.x[upper_row];
+      const RowVector6 logit_jacobian =
+        geometry.jacobian.row(lower_row) / lower_clearance -
+        geometry.jacobian.row(upper_row) / upper_clearance;
+      const double logit_curvature =
+        geometry.curvature[lower_row] / lower_clearance -
+        velocity[lower_row] * velocity[lower_row] /
+        (lower_clearance * lower_clearance) -
+        geometry.curvature[upper_row] / upper_clearance +
+        velocity[upper_row] * velocity[upper_row] /
+        (upper_clearance * upper_clearance);
+
+      accumulate_scalar_natural_leaf(
+        logit_jacobian,
+        leaf.task_inertia,
+        leaf.task_natural_force,
+        logit_curvature,
+        metric,
+        force);
+    }
+    return;
+  }
+
+  const bool use_natural_rmp = uses_rmp2_solve() && uses_natural_rmp();
   for (Eigen::Index row = 0; row < geometry.x.size(); ++row) {
     const double x = std::max(geometry.x[row], 0.0);
     const double xd = velocity[row];
@@ -1685,8 +2484,51 @@ void PinocchioDirectRmpSolver::accumulate_collision(
   Matrix6 & metric,
   JointVector & force) const
 {
-  const bool use_natural_rmp = uses_rmp2_solve() && uses_natural_rmp();
   const auto velocity = velocity_of(geometry, qd);
+  if (config_.collision.policy == "paper_gds") {
+    paper_gds_collision::Params params;
+    params.metric_scalar = config_.collision.metric_scalar;
+    params.metric_modulation_radius =
+      config_.collision.metric_modulation_radius;
+    params.metric_exploder_std_dev =
+      config_.collision.metric_exploder_std_dev;
+    params.metric_exploder_eps =
+      config_.collision.metric_exploder_eps;
+    params.clearance_smoothing =
+      config_.collision.gds_clearance_smoothing;
+    params.metric_velocity_floor =
+      config_.collision.gds_metric_velocity_floor;
+    params.metric_velocity_scale =
+      config_.collision.gds_metric_velocity_scale;
+    params.repulsion_gain = config_.collision.repulsion_gain;
+    params.repulsion_std_dev =
+      config_.collision.repulsion_std_dev;
+    params.damping_gain = config_.collision.damping_gain;
+    params.damping_std_dev = config_.collision.damping_std_dev;
+    params.damping_robustness_eps =
+      config_.collision.damping_robustness_eps;
+    params.damping_velocity_scale =
+      config_.collision.gds_damping_velocity_scale;
+
+    for (Eigen::Index row = 0; row < geometry.x.size(); ++row) {
+      const auto leaf = paper_gds_collision::evaluate(
+        geometry.x[row], velocity[row], params);
+      if (!leaf.valid) {
+        throw std::runtime_error(
+                "paper_gds collision leaf violated its GDS validity conditions");
+      }
+      accumulate_scalar_natural_leaf(
+        geometry.jacobian.row(row),
+        leaf.M,
+        leaf.natural_force,
+        geometry.curvature[row],
+        metric,
+        force);
+    }
+    return;
+  }
+
+  const bool use_natural_rmp = uses_rmp2_solve() && uses_natural_rmp();
   for (Eigen::Index row = 0; row < geometry.x.size(); ++row) {
     const double x = std::max(geometry.x[row], 0.0);
     const double xd = velocity[row];
@@ -1722,6 +2564,7 @@ void PinocchioDirectRmpSolver::accumulate_collision(
 }
 
 void PinocchioDirectRmpSolver::accumulate_tangent_escape(
+  const JointVector & q,
   const KinematicsContext & context,
   const NodeGeometry & geometry,
   const JointVector & qd,
@@ -1732,1068 +2575,43 @@ void PinocchioDirectRmpSolver::accumulate_tangent_escape(
   JointVector & force,
   std::vector<double> * debug_data) const
 {
-  (void)goal;
-  const auto & params = config_.tangent_escape;
-  const auto reset_gds_modes = [this]() {
-      for (auto & mode : tangent_escape_gds_modes_) {
-        mode.active = false;
-        mode.activation = 0.0;
-      }
-    };
-  const auto reset_softmax_gds_modes = [this]() {
-      for (auto & sensor_modes : tangent_escape_softmax_gds_modes_) {
-        for (auto & mode : sensor_modes) {
-          mode.active = false;
-          mode.activation = 0.0;
-        }
-      }
-    };
-
-  double best_debug_score = -std::numeric_limits<double>::infinity();
-  std::vector<double> best_debug_data{0.0};
-  const double tangent_metric_scalar = std::max(params.metric_scalar, 0.0);
-  if (
-    !params.enabled ||
-    tangent_metric_scalar <= 0.0 ||
-    geometry.x.size() % 3 != 0 ||
-    geometry.jacobian.cols() != 6)
-  {
-    reset_gds_modes();
-    reset_softmax_gds_modes();
-    tangent_escape_supervisor_.active = false;
-    tangent_escape_supervisor_.mode = 0;
-    if (debug_data != nullptr) {
-      *debug_data = best_debug_data;
-    }
+  const Matrix6 base_metric = metric;
+  const JointVector base_force = force;
+  if (config_.tangent_escape.acceleration_model == "risk_damped") {
+    accumulate_tangent_escape_risk_damped(
+      q,
+      context,
+      geometry,
+      qd,
+      goal,
+      obstacles,
+      nominal_qdd,
+      base_metric,
+      base_force,
+      metric,
+      force,
+      debug_data);
     return;
   }
-
-  const std::string leaf_mode = params.leaf_mode.empty() ? "gds" : params.leaf_mode;
-  const bool use_gds_branch = leaf_mode == "gds" || leaf_mode == "gds_branch";
-  const bool use_stable_hybrid_gds =
-    leaf_mode == "stable_hybrid_gds" || leaf_mode == "latched_gds" ||
-    leaf_mode == "stage4_stable";
-  const bool use_collision_scaled_accel =
-    leaf_mode == "collision_scaled" || leaf_mode == "collision_scaled_accel";
-  const bool use_softmax_gds_branch =
-    use_stable_hybrid_gds || leaf_mode == "softmax_gds" || leaf_mode == "score_gds" ||
-    leaf_mode == "stage3" || use_collision_scaled_accel;
-  const bool use_direct_accel =
-    leaf_mode == "direct" || leaf_mode == "direct_accel" || leaf_mode == "stage1";
-  if (!use_gds_branch && !use_softmax_gds_branch && !use_direct_accel) {
-    throw std::runtime_error(
-            "Unsupported tangent_escape_rmp_leaf_mode: " + leaf_mode +
-            " (expected gds, softmax_gds, stable_hybrid_gds, collision_scaled, or "
-            "direct_accel)");
-  }
-  const bool use_stage4_supervisor = params.supervisor_enabled && use_softmax_gds_branch;
-  const double supervisor_dt = std::max(params.supervisor_dt, 1e-4);
-  const double recovery_duration = std::max(params.recovery_duration, 0.0);
-  const double blocked_decay_time = std::max(params.blocked_memory_decay_time, 1e-3);
-  const double blocked_decay = std::exp(-supervisor_dt / blocked_decay_time);
-  if (use_stage4_supervisor) {
-    for (auto & sensor_memory : tangent_escape_blocked_memory_) {
-      for (auto & memory : sensor_memory) {
-        memory *= blocked_decay;
-        if (memory < 1e-4) {
-          memory = 0.0;
-        }
-      }
-    }
-  }
-
-  const auto max_blocked_memory = [this]() {
-      double maximum = 0.0;
-      for (const auto & sensor_memory : tangent_escape_blocked_memory_) {
-        for (const double memory : sensor_memory) {
-          maximum = std::max(maximum, memory);
-        }
-      }
-      return maximum;
-    };
-  const auto advance_supervisor_recovery = [
-      this,
-      use_stage4_supervisor,
-      supervisor_dt,
-      recovery_duration,
-      use_stable_hybrid_gds,
-      &best_debug_data,
-      &max_blocked_memory]() {
-      if (!use_stage4_supervisor || !tangent_escape_supervisor_.active) {
-        tangent_escape_supervisor_.active = false;
-        tangent_escape_supervisor_.mode = 0;
-        return;
-      }
-
-      tangent_escape_supervisor_.mode = 3;
-      tangent_escape_supervisor_.recovery_timer_s += supervisor_dt;
-      if (
-        recovery_duration <= 0.0 ||
-        tangent_escape_supervisor_.recovery_timer_s >= recovery_duration)
-      {
-        tangent_escape_supervisor_.active = false;
-        tangent_escape_supervisor_.mode = 0;
-        tangent_escape_supervisor_.branch_age_s = 0.0;
-        tangent_escape_supervisor_.hold_age_s = 0.0;
-        tangent_escape_supervisor_.stuck_timer_s = 0.0;
-        tangent_escape_supervisor_.recovery_timer_s = 0.0;
-        return;
-      }
-
-      // Preserve the inactive recovery mode in the debug stream. Candidate data
-      // still starts at index 61, so this remains backward-compatible.
-      best_debug_data.assign(61, 0.0);
-      best_debug_data[1] = static_cast<double>(
-        tangent_escape_supervisor_.control_point_index);
-      best_debug_data[20] = tangent_escape_supervisor_.tangent.x();
-      best_debug_data[21] = tangent_escape_supervisor_.tangent.y();
-      best_debug_data[22] = tangent_escape_supervisor_.tangent.z();
-      best_debug_data[26] = use_stable_hybrid_gds ? 4.0 : 3.0;
-      best_debug_data[38] = static_cast<double>(tangent_escape_supervisor_.slot);
-      best_debug_data[47] = 3.0;
-      best_debug_data[49] = tangent_escape_supervisor_.hold_age_s;
-      best_debug_data[52] = tangent_escape_supervisor_.stuck_timer_s;
-      best_debug_data[54] = 1.0;
-      best_debug_data[55] = 1.0;
-      best_debug_data[57] = max_blocked_memory();
-      best_debug_data[58] = tangent_escape_supervisor_.branch_age_s;
-    };
-
-  if (obstacles.empty()) {
-    reset_gds_modes();
-    reset_softmax_gds_modes();
-    advance_supervisor_recovery();
-    if (debug_data != nullptr) {
-      *debug_data = best_debug_data;
-    }
+  if (config_.tangent_escape.acceleration_model == "canonical_velocity") {
+    accumulate_tangent_escape_canonical(
+      q,
+      context,
+      geometry,
+      qd,
+      goal,
+      obstacles,
+      nominal_qdd,
+      base_metric,
+      base_force,
+      metric,
+      force,
+      debug_data);
     return;
   }
-
-  if (use_direct_accel) {
-    reset_gds_modes();
-    reset_softmax_gds_modes();
-  } else if (use_gds_branch) {
-    reset_softmax_gds_modes();
-  } else if (use_softmax_gds_branch) {
-    reset_gds_modes();
-  }
-
-  const bool use_natural_rmp = uses_rmp2_solve() && uses_natural_rmp();
-  const auto velocity = velocity_of(geometry, qd);
-  const std::size_t point_count = static_cast<std::size_t>(geometry.x.size() / 3);
-  const double prediction_dt = std::max(params.nominal_prediction_dt, 0.0);
-  const double min_nominal_speed = std::max(params.nominal_min_speed, 1e-9);
-  const double tangent_bias_weight = std::max(params.tangent_bias_weight, 0.0);
-  const double max_accel = std::max(params.max_accel, 0.0);
-  const double gds_position_gain = std::max(params.position_gain, 0.0);
-  const double gds_damping_gain = std::max(params.damping_gain, 0.0);
-  const double escape_length = std::max(params.escape_length, 0.0);
-  const double collision_accel_scale = std::max(params.collision_accel_scale, 0.0);
-  const double softmax_beta = std::max(params.softmax_beta, 0.0);
-  const double goal_score_weight = params.goal_weight;
-  const double continuity_score_weight = params.continuity_weight;
-  const double duplicate_risk_weight = std::max(params.duplicate_risk_weight, 0.0);
-  const double adjacent_risk_weight = std::max(params.adjacent_block_weight, 0.0);
-  const double branch_hold_duration = std::max(params.branch_hold_duration, 0.0);
-  const double branch_hold_weight = std::max(params.branch_hold_weight, 0.0);
-  const double branch_hold_max_adjacent_risk =
-    std::max(params.branch_hold_max_adjacent_risk, 0.0);
-  const double stable_mode_normal_tolerance =
-    std::clamp(params.stable_mode_normal_tolerance, 1e-6, 1.0);
-  const double stuck_activation_threshold =
-    std::clamp(params.stuck_activation_threshold, 0.0, 1.0);
-  const double stuck_velocity_threshold = std::max(params.stuck_velocity_threshold, 0.0);
-  const double stuck_progress_threshold = std::max(params.stuck_progress_threshold, 0.0);
-  const double stuck_time_threshold = std::max(params.stuck_time_threshold, 0.0);
-  const double stuck_metric_boost = std::max(params.stuck_metric_boost, 1.0);
-  const double stuck_accel_boost = std::max(params.stuck_accel_boost, 1.0);
-  const double blocked_update_duration =
-    std::max(params.blocked_memory_update_duration, 0.0);
-  const double blocked_progress_threshold =
-    std::max(params.blocked_memory_progress_threshold, 0.0);
-  const double blocked_clearance_improvement =
-    std::max(params.blocked_memory_clearance_improvement, 0.0);
-  const double blocked_penalty_weight = std::max(params.blocked_memory_penalty_weight, 0.0);
-  std::array<bool, RB10Model::sensor_control_points.size()> gds_mode_used{};
-  std::array<
-    std::array<bool, tangent_escape_softmax_candidate_count_>,
-    RB10Model::sensor_control_points.size()> softmax_mode_used{};
-  const TangentEscapeSupervisorState supervisor_before_solve = tangent_escape_supervisor_;
-  TangentEscapeSupervisorState pending_supervisor_state = supervisor_before_solve;
-  bool pending_supervisor_update = false;
-  bool pending_blocked_memory_set = false;
-  bool pending_blocked_memory_clear = false;
-  std::size_t pending_blocked_point_index = 0;
-  std::size_t pending_blocked_slot = 0;
-
-  for (std::size_t point_index = 0; point_index < point_count; ++point_index) {
-    if (point_index >= RB10Model::sensor_control_points.size()) {
-      break;
-    }
-
-    const Eigen::Vector3d control_point =
-      geometry.x.segment<3>(static_cast<Eigen::Index>(3 * point_index));
-    const Eigen::Matrix<double, 3, 6> point_jacobian =
-      geometry.jacobian.block<3, 6>(static_cast<Eigen::Index>(3 * point_index), 0);
-    const Eigen::Vector3d point_velocity =
-      velocity.segment<3>(static_cast<Eigen::Index>(3 * point_index));
-    const Eigen::Vector3d point_curvature =
-      geometry.curvature.segment<3>(static_cast<Eigen::Index>(3 * point_index));
-    const double point_radius = RB10Model::sensor_control_points[point_index].radius;
-
-    for (const auto & obstacle : obstacles) {
-      if (
-        obstacle.radius <= 0.0 ||
-        !obstacle.center.allFinite() ||
-        obstacle.proximity_control_point_index != static_cast<int>(point_index))
-      {
-        continue;
-      }
-
-      const Eigen::Vector3d delta = control_point - obstacle.center;
-      const double center_distance = delta.norm();
-      if (center_distance <= 1e-9) {
-        continue;
-      }
-
-      const double clearance =
-        center_distance - (point_radius + obstacle.radius) - config_.collision.margin;
-      const double proximity_activation = tangent_escape_activation(clearance, params);
-      if (proximity_activation <= 0.0) {
-        continue;
-      }
-
-      const Eigen::Vector3d collision_normal = delta / center_distance;
-      const Eigen::Vector3d obstacle_direction = -collision_normal;
-      const double clearance_rate = collision_normal.dot(point_velocity);
-      const double collision_accel =
-        collision_scalar_acceleration(clearance, clearance_rate, config_.collision);
-      const double scaled_collision_accel = collision_accel_scale * collision_accel;
-      if (!std::isfinite(collision_accel) || !std::isfinite(scaled_collision_accel)) {
-        continue;
-      }
-      const Eigen::Vector3d nominal_velocity =
-        point_jacobian * (qd + prediction_dt * nominal_qdd);
-      const double nominal_speed = nominal_velocity.norm();
-      if (nominal_speed < min_nominal_speed || !nominal_velocity.allFinite()) {
-        continue;
-      }
-
-      const Eigen::Vector3d nominal_direction = nominal_velocity / nominal_speed;
-      const double beta = nominal_direction.dot(obstacle_direction);
-      const double blocking_activation = tangent_escape_blocking_activation(beta, params);
-      const double activation = proximity_activation * blocking_activation;
-      if (activation < params.min_activation) {
-        continue;
-      }
-      const double debug_score = activation * (1.0 + beta);
-
-      const auto & sensor = RB10Model::sensor_control_points[point_index];
-      if (sensor.parent_link >= context.link_rotations.size()) {
-        continue;
-      }
-      const Eigen::Vector3d tangent_bias_world =
-        context.link_rotations[sensor.parent_link] * sensor.local_tangent_bias;
-      const auto nominal_tangent = project_to_tangent_direction(
-        nominal_direction,
-        obstacle_direction,
-        params.min_tangent_norm);
-      const auto bias_tangent = project_to_tangent_direction(
-        tangent_bias_world,
-        obstacle_direction,
-        params.min_tangent_norm);
-      if (!nominal_tangent.has_value() && !bias_tangent.has_value()) {
-        continue;
-      }
-
-      Eigen::Vector3d tangent_raw = Eigen::Vector3d::Zero();
-      if (nominal_tangent.has_value()) {
-        tangent_raw += nominal_tangent.value();
-      }
-      if (bias_tangent.has_value()) {
-        tangent_raw += tangent_bias_weight * bias_tangent.value();
-      }
-      const double tangent_norm = tangent_raw.norm();
-      if (tangent_norm <= params.min_tangent_norm || !tangent_raw.allFinite()) {
-        continue;
-      }
-      const Eigen::Vector3d tangent = tangent_raw / tangent_norm;
-      const double effective_metric_scalar = activation * tangent_metric_scalar;
-      if (effective_metric_scalar <= 0.0) {
-        continue;
-      }
-      double reported_effective_metric_scalar = effective_metric_scalar;
-
-      double mode_id = 1.0;
-      double scalar_s = 0.0;
-      double scalar_target = 0.0;
-      double scalar_velocity = point_velocity.dot(tangent);
-      double scalar_error = 0.0;
-      Eigen::Vector3d mode_origin = control_point;
-      Eigen::Vector3d applied_tangent = tangent;
-      double desired_tangent_accel = 0.0;
-      Eigen::Vector3d desired_acceleration = Eigen::Vector3d::Zero();
-      double stage3_candidate_count = 0.0;
-      double stage3_selected_candidate_index = -1.0;
-      double stage3_selected_weight = 0.0;
-      double stage3_selected_score = 0.0;
-      double stage3_selected_goal_score = 0.0;
-      double stage3_selected_continuity_score = 0.0;
-      double stage3_selected_adjacent_risk = 0.0;
-      double stage3_branch_weight_sum = 0.0;
-      double stage3_weight_entropy = 0.0;
-      double stage4_supervisor_mode_id = 0.0;
-      double stage4_hold_active = 0.0;
-      double stage4_hold_age_s = 0.0;
-      double stage4_selected_hold_bonus = 0.0;
-      double stage4_stuck_score = 0.0;
-      double stage4_stuck_timer_s = 0.0;
-      double stage4_stuck_active = 0.0;
-      double stage4_metric_boost = 1.0;
-      double stage4_accel_boost = 1.0;
-      double stage4_selected_blocked_penalty = 0.0;
-      double stage4_max_blocked_memory = 0.0;
-      double stage4_branch_age_s = 0.0;
-      double stage4_branch_progress_m = 0.0;
-      double stage4_clearance_improvement_m = 0.0;
-      std::vector<double> stage3_candidate_debug_values;
-
-      if (use_softmax_gds_branch) {
-        const bool supervisor_owns_point =
-          use_stage4_supervisor && supervisor_before_solve.active &&
-          supervisor_before_solve.mode != 3 &&
-          supervisor_before_solve.control_point_index == point_index;
-        const int stable_supervisor_mode = supervisor_owns_point ?
-          supervisor_before_solve.mode : 0;
-        const bool stable_hold_phase =
-          supervisor_owns_point && branch_hold_duration > 0.0 &&
-          supervisor_before_solve.branch_age_s <= branch_hold_duration;
-        bool stable_modes_latched = false;
-        if (use_stable_hybrid_gds) {
-          for (const auto & mode : tangent_escape_softmax_gds_modes_[point_index]) {
-            stable_modes_latched = stable_modes_latched || mode.active;
-          }
-          if (stable_modes_latched) {
-            bool relatch_required = false;
-            for (const auto & mode : tangent_escape_softmax_gds_modes_[point_index]) {
-              if (!mode.active) {
-                continue;
-              }
-              relatch_required = relatch_required ||
-                std::abs(mode.tangent.dot(obstacle_direction)) > stable_mode_normal_tolerance ||
-                mode.supervisor_mode != stable_supervisor_mode ||
-                mode.hold_phase != stable_hold_phase;
-            }
-            if (relatch_required) {
-              for (auto & mode : tangent_escape_softmax_gds_modes_[point_index]) {
-                mode.active = false;
-                mode.activation = 0.0;
-              }
-              stable_modes_latched = false;
-            }
-          }
-        }
-
-        std::vector<TangentEscapeSoftmaxCandidate> candidates;
-        candidates.reserve(tangent_escape_softmax_candidate_count_);
-        if (stable_modes_latched) {
-          for (std::size_t slot = 0; slot < tangent_escape_softmax_candidate_count_; ++slot) {
-            const auto & mode = tangent_escape_softmax_gds_modes_[point_index][slot];
-            if (!mode.active) {
-              continue;
-            }
-            TangentEscapeSoftmaxCandidate candidate;
-            candidate.slot = slot;
-            candidate.direction = mode.tangent;
-            candidates.push_back(candidate);
-          }
-        } else {
-          add_unique_tangent_candidate(candidates, 0, nominal_tangent);
-          add_unique_tangent_candidate(candidates, 1, bias_tangent);
-          add_unique_tangent_candidate(
-            candidates,
-            2,
-            project_to_tangent_direction(
-              -tangent_bias_world,
-              obstacle_direction,
-              params.min_tangent_norm));
-          add_unique_tangent_candidate(
-            candidates,
-            3,
-            project_to_tangent_direction(
-              Eigen::Vector3d::UnitZ(),
-              obstacle_direction,
-              params.min_tangent_norm));
-          add_unique_tangent_candidate(
-            candidates,
-            4,
-            project_to_tangent_direction(
-              -Eigen::Vector3d::UnitZ(),
-              obstacle_direction,
-              params.min_tangent_norm));
-        }
-
-        if (candidates.empty()) {
-          continue;
-        }
-
-        const std::uint64_t stable_generation =
-          use_stable_hybrid_gds && !stable_modes_latched ?
-          ++tangent_escape_mode_generation_ : 0;
-
-        const Eigen::Vector3d tangent_velocity =
-          point_velocity - point_velocity.dot(obstacle_direction) * obstacle_direction;
-        const double tangent_velocity_norm = tangent_velocity.norm();
-        const bool has_tangent_velocity =
-          tangent_velocity_norm > params.min_tangent_norm && tangent_velocity.allFinite();
-        Eigen::Vector3d tangent_velocity_direction = Eigen::Vector3d::Zero();
-        if (has_tangent_velocity) {
-          tangent_velocity_direction = tangent_velocity / tangent_velocity_norm;
-        }
-
-        double max_score = -std::numeric_limits<double>::infinity();
-        for (auto & candidate : candidates) {
-          auto & mode_state =
-            tangent_escape_softmax_gds_modes_[point_index][candidate.slot];
-          if (!mode_state.active || !mode_state.tangent.allFinite()) {
-            mode_state.active = true;
-            mode_state.origin = control_point;
-            mode_state.tangent = candidate.direction;
-            mode_state.obstacle_direction = obstacle_direction;
-            mode_state.activation = activation;
-            mode_state.generation = stable_generation;
-            mode_state.supervisor_mode = stable_supervisor_mode;
-            mode_state.hold_phase = stable_hold_phase;
-          }
-          if (!use_stable_hybrid_gds) {
-            mode_state.activation = activation;
-          }
-          softmax_mode_used[point_index][candidate.slot] = true;
-
-          candidate.origin = mode_state.origin;
-          if (use_stable_hybrid_gds && stable_modes_latched) {
-            candidate.applied_tangent = mode_state.tangent;
-            candidate.goal_score = mode_state.goal_score;
-            candidate.continuity_score = mode_state.continuity_score;
-            candidate.duplicate_risk = mode_state.duplicate_risk;
-            candidate.adjacent_risk = mode_state.adjacent_risk;
-            candidate.hold_bonus = mode_state.hold_bonus;
-            candidate.blocked_penalty = mode_state.blocked_penalty;
-            candidate.base_score = mode_state.base_score;
-            candidate.score = mode_state.score;
-            candidate.weight = mode_state.branch_weight;
-            candidate.metric_boost = mode_state.metric_boost;
-            candidate.accel_boost = mode_state.accel_boost;
-            candidate.mode_generation = mode_state.generation;
-            candidate.weights_latched = true;
-          } else {
-            candidate.applied_tangent = use_stable_hybrid_gds ?
-              mode_state.tangent :
-              reproject_mode_tangent(
-                mode_state.tangent,
-                candidate.direction,
-                obstacle_direction,
-                params.min_tangent_norm);
-            mode_state.tangent = candidate.applied_tangent;
-            candidate.goal_score = candidate.applied_tangent.dot(nominal_direction);
-            candidate.continuity_score = has_tangent_velocity ?
-              candidate.applied_tangent.dot(tangent_velocity_direction) :
-              0.0;
-            // Vertical branches are intentionally exempt from predictive duplicate risk.
-            candidate.duplicate_risk = candidate.slot == 3 || candidate.slot == 4 ?
-              0.0 :
-              tangent_escape_predictive_duplicate_risk(
-                params,
-                geometry,
-                point_index,
-                candidate.applied_tangent,
-                obstacle_direction,
-                proximity_activation);
-            candidate.adjacent_risk = tangent_escape_instantaneous_adjacent_risk(
-              params,
-              geometry,
-              point_count,
-              point_index,
-              candidate.applied_tangent,
-              obstacles);
-            candidate.base_score =
-              goal_score_weight * candidate.goal_score +
-              continuity_score_weight * candidate.continuity_score -
-              duplicate_risk_weight * candidate.duplicate_risk -
-              adjacent_risk_weight * candidate.adjacent_risk;
-            if (use_stage4_supervisor) {
-              const bool same_held_branch =
-                supervisor_before_solve.active &&
-                supervisor_before_solve.mode != 3 &&
-                supervisor_before_solve.control_point_index == point_index &&
-                supervisor_before_solve.slot == candidate.slot;
-              if (
-                same_held_branch &&
-                branch_hold_duration > 0.0 &&
-                supervisor_before_solve.branch_age_s <= branch_hold_duration &&
-                candidate.adjacent_risk <= branch_hold_max_adjacent_risk)
-              {
-                const double hold_phase =
-                  1.0 - std::clamp(
-                    supervisor_before_solve.branch_age_s / branch_hold_duration,
-                    0.0,
-                    1.0);
-                candidate.hold_bonus = branch_hold_weight * hold_phase;
-              }
-              const double memory =
-                tangent_escape_blocked_memory_[point_index][candidate.slot];
-              candidate.blocked_penalty = blocked_penalty_weight * memory;
-              stage4_max_blocked_memory = std::max(stage4_max_blocked_memory, memory);
-            }
-            candidate.score =
-              candidate.base_score +
-              candidate.hold_bonus +
-              candidate.stuck_bonus -
-              candidate.blocked_penalty;
-          }
-        }
-
-        if (
-          use_stage4_supervisor &&
-          supervisor_before_solve.active &&
-          supervisor_before_solve.mode != 3 &&
-          supervisor_before_solve.control_point_index == point_index &&
-          branch_hold_duration > 0.0 &&
-          supervisor_before_solve.branch_age_s <= branch_hold_duration &&
-          !(use_stable_hybrid_gds && stable_modes_latched))
-        {
-          auto held_candidate = std::find_if(
-            candidates.begin(),
-            candidates.end(),
-            [&supervisor_before_solve, branch_hold_max_adjacent_risk](const auto & candidate) {
-              return
-                candidate.slot == supervisor_before_solve.slot &&
-                candidate.adjacent_risk <= branch_hold_max_adjacent_risk;
-            });
-          if (held_candidate != candidates.end()) {
-            double best_other_score = -std::numeric_limits<double>::infinity();
-            for (const auto & candidate : candidates) {
-              if (candidate.slot != held_candidate->slot) {
-                best_other_score = std::max(best_other_score, candidate.score);
-              }
-            }
-            if (std::isfinite(best_other_score) && held_candidate->score <= best_other_score) {
-              const double hold_phase =
-                1.0 - std::clamp(
-                supervisor_before_solve.branch_age_s / branch_hold_duration,
-                0.0,
-                1.0);
-              const double hold_margin = std::max(branch_hold_weight * hold_phase, 1e-6);
-              const double lock_bonus = best_other_score + hold_margin - held_candidate->score;
-              held_candidate->hold_bonus += lock_bonus;
-              held_candidate->score += lock_bonus;
-            }
-          }
-        }
-
-        for (const auto & candidate : candidates) {
-          max_score = std::max(max_score, candidate.score);
-        }
-
-        double exp_sum = 0.0;
-        if (use_stable_hybrid_gds && stable_modes_latched) {
-          for (const auto & candidate : candidates) {
-            exp_sum += candidate.weight;
-          }
-        } else {
-          for (auto & candidate : candidates) {
-            const double exponent = softmax_beta * (candidate.score - max_score);
-            candidate.weight = std::exp(std::clamp(exponent, -60.0, 60.0));
-            exp_sum += candidate.weight;
-          }
-        }
-        if (exp_sum <= 1e-12 || !std::isfinite(exp_sum)) {
-          continue;
-        }
-
-        TangentEscapeSoftmaxCandidate * selected_candidate = nullptr;
-        Eigen::Vector3d weighted_desired_acceleration = Eigen::Vector3d::Zero();
-        for (auto & candidate : candidates) {
-          if (!(use_stable_hybrid_gds && stable_modes_latched)) {
-            candidate.weight /= exp_sum;
-          }
-          const bool stuck_boost_applies =
-            use_stage4_supervisor &&
-            supervisor_before_solve.active &&
-            supervisor_before_solve.mode == 2 &&
-            supervisor_before_solve.control_point_index == point_index &&
-            supervisor_before_solve.slot == candidate.slot;
-          if (!(use_stable_hybrid_gds && stable_modes_latched)) {
-            candidate.metric_boost = stuck_boost_applies ? stuck_metric_boost : 1.0;
-            candidate.accel_boost = stuck_boost_applies ? stuck_accel_boost : 1.0;
-          }
-          auto & mode_state =
-            tangent_escape_softmax_gds_modes_[point_index][candidate.slot];
-          const double candidate_activation = use_stable_hybrid_gds ?
-            mode_state.activation : activation;
-          candidate.metric_scalar =
-            candidate_activation * tangent_metric_scalar *
-            candidate.weight * candidate.metric_boost;
-          candidate.scalar_s = candidate.applied_tangent.dot(control_point - candidate.origin);
-          candidate.scalar_target = escape_length;
-          candidate.scalar_velocity = candidate.applied_tangent.dot(point_velocity);
-          candidate.scalar_error = candidate.scalar_target - candidate.scalar_s;
-          candidate.clearance_rate = clearance_rate;
-          candidate.collision_accel = collision_accel;
-          candidate.scaled_collision_accel = scaled_collision_accel;
-          if (use_collision_scaled_accel) {
-            candidate.scalar_target = 0.0;
-            candidate.scalar_error = 0.0;
-            const double effective_max_accel = max_accel * candidate.accel_boost;
-            const double collision_drive =
-              candidate.accel_boost * candidate.scaled_collision_accel;
-            candidate.desired_tangent_accel =
-              collision_drive - gds_damping_gain * candidate.scalar_velocity;
-            if (effective_max_accel > 0.0) {
-              candidate.desired_tangent_accel = std::clamp(
-                candidate.desired_tangent_accel,
-                -effective_max_accel,
-                effective_max_accel);
-            }
-          } else if (use_stable_hybrid_gds) {
-            const double effective_position_gain =
-              gds_position_gain * candidate.accel_boost;
-            const double effective_damping_gain =
-              gds_damping_gain * candidate.accel_boost;
-            const double effective_max_accel = max_accel * candidate.accel_boost;
-            const double spring_acceleration = bounded_spring_acceleration(
-              candidate.scalar_error,
-              effective_position_gain,
-              effective_max_accel);
-            candidate.desired_tangent_accel =
-              spring_acceleration - effective_damping_gain * candidate.scalar_velocity;
-            candidate.potential_energy = bounded_spring_potential(
-              candidate.scalar_error,
-              effective_position_gain,
-              effective_max_accel,
-              candidate.metric_scalar);
-            candidate.kinetic_energy =
-              0.5 * candidate.metric_scalar * candidate.scalar_velocity *
-              candidate.scalar_velocity;
-            candidate.lyapunov_energy =
-              candidate.potential_energy + candidate.kinetic_energy;
-            candidate.damping_vdot =
-              -candidate.metric_scalar * effective_damping_gain *
-              candidate.scalar_velocity * candidate.scalar_velocity;
-            candidate.mode_generation = mode_state.generation;
-            candidate.weights_latched = true;
-            candidate.bounded_potential = true;
-            candidate.mode_normal_dot_tangent =
-              mode_state.obstacle_direction.dot(candidate.applied_tangent);
-          } else if (max_accel > 0.0) {
-            candidate.desired_tangent_accel =
-              gds_position_gain * candidate.scalar_error -
-              gds_damping_gain * candidate.scalar_velocity;
-            candidate.desired_tangent_accel = std::clamp(
-              candidate.desired_tangent_accel * candidate.accel_boost,
-              -max_accel * candidate.accel_boost,
-              max_accel * candidate.accel_boost);
-          } else {
-            candidate.desired_tangent_accel =
-              candidate.accel_boost *
-              (gds_position_gain * candidate.scalar_error -
-              gds_damping_gain * candidate.scalar_velocity);
-          }
-          if (!use_stable_hybrid_gds) {
-            candidate.mode_normal_dot_tangent =
-              obstacle_direction.dot(candidate.applied_tangent);
-          }
-
-          if (use_stable_hybrid_gds && !stable_modes_latched) {
-            mode_state.branch_weight = candidate.weight;
-            mode_state.goal_score = candidate.goal_score;
-            mode_state.continuity_score = candidate.continuity_score;
-            mode_state.duplicate_risk = candidate.duplicate_risk;
-            mode_state.adjacent_risk = candidate.adjacent_risk;
-            mode_state.hold_bonus = candidate.hold_bonus;
-            mode_state.blocked_penalty = candidate.blocked_penalty;
-            mode_state.base_score = candidate.base_score;
-            mode_state.score = candidate.score;
-            mode_state.metric_boost = candidate.metric_boost;
-            mode_state.accel_boost = candidate.accel_boost;
-            mode_state.generation = stable_generation;
-            mode_state.supervisor_mode = stable_supervisor_mode;
-            mode_state.hold_phase = stable_hold_phase;
-            candidate.mode_generation = stable_generation;
-          }
-
-          const Eigen::Vector3d candidate_acceleration =
-            candidate.desired_tangent_accel * candidate.applied_tangent;
-          weighted_desired_acceleration += candidate.weight * candidate_acceleration;
-          stage3_branch_weight_sum += candidate.weight;
-          if (candidate.weight > 1e-12) {
-            stage3_weight_entropy -= candidate.weight * std::log(candidate.weight);
-          }
-
-          const RowVector6 scalar_jacobian =
-            candidate.applied_tangent.transpose() * point_jacobian;
-          const double scalar_curvature = candidate.applied_tangent.dot(point_curvature);
-          accumulate_scalar_leaf(
-            use_natural_rmp,
-            scalar_jacobian,
-            candidate.metric_scalar,
-            candidate.desired_tangent_accel,
-            scalar_curvature,
-            metric,
-            force);
-
-          if (
-            selected_candidate == nullptr ||
-            candidate.weight > selected_candidate->weight)
-          {
-            selected_candidate = &candidate;
-          }
-        }
-
-        if (selected_candidate == nullptr) {
-          continue;
-        }
-
-        mode_id = use_collision_scaled_accel ? 5.0 : (use_stable_hybrid_gds ? 4.0 : 3.0);
-        stage3_candidate_count = static_cast<double>(candidates.size());
-        stage3_selected_candidate_index = static_cast<double>(selected_candidate->slot);
-        stage3_selected_weight = selected_candidate->weight;
-        stage3_selected_score = selected_candidate->score;
-        stage3_selected_goal_score = selected_candidate->goal_score;
-        stage3_selected_continuity_score = selected_candidate->continuity_score;
-        stage3_selected_adjacent_risk = selected_candidate->adjacent_risk;
-        mode_origin = selected_candidate->origin;
-        applied_tangent = selected_candidate->applied_tangent;
-        scalar_s = selected_candidate->scalar_s;
-        scalar_target = selected_candidate->scalar_target;
-        scalar_velocity = selected_candidate->scalar_velocity;
-        scalar_error = selected_candidate->scalar_error;
-        desired_tangent_accel = selected_candidate->desired_tangent_accel;
-        desired_acceleration = weighted_desired_acceleration;
-        if (use_stable_hybrid_gds) {
-          const auto & selected_mode =
-            tangent_escape_softmax_gds_modes_[point_index][selected_candidate->slot];
-          reported_effective_metric_scalar =
-            selected_mode.activation * tangent_metric_scalar;
-        }
-        if (use_stage4_supervisor) {
-          stage4_max_blocked_memory = max_blocked_memory();
-        }
-
-        if (use_stage4_supervisor && debug_score > best_debug_score) {
-          const bool same_branch =
-            supervisor_before_solve.active &&
-            supervisor_before_solve.mode != 3 &&
-            supervisor_before_solve.control_point_index == point_index &&
-            supervisor_before_solve.slot == selected_candidate->slot;
-          TangentEscapeSupervisorState next_state = supervisor_before_solve;
-          if (!same_branch) {
-            next_state.active = true;
-            next_state.control_point_index = point_index;
-            next_state.slot = selected_candidate->slot;
-            next_state.tangent = selected_candidate->applied_tangent;
-            next_state.branch_age_s = 0.0;
-            next_state.hold_age_s = 0.0;
-            next_state.stuck_timer_s = 0.0;
-            next_state.recovery_timer_s = 0.0;
-            next_state.start_scalar_s = selected_candidate->scalar_s;
-            next_state.best_scalar_s = selected_candidate->scalar_s;
-            next_state.start_clearance = clearance;
-            next_state.best_clearance = clearance;
-          } else {
-            next_state.branch_age_s += supervisor_dt;
-            next_state.hold_age_s += supervisor_dt;
-            next_state.tangent = selected_candidate->applied_tangent;
-            next_state.best_scalar_s = std::max(
-              next_state.best_scalar_s,
-              selected_candidate->scalar_s);
-            next_state.best_clearance = std::max(
-              next_state.best_clearance,
-              clearance);
-          }
-
-          const double branch_progress =
-            next_state.best_scalar_s - next_state.start_scalar_s;
-          const double clearance_improvement =
-            next_state.best_clearance - next_state.start_clearance;
-          const bool low_progress = branch_progress < stuck_progress_threshold;
-          const bool low_velocity =
-            std::abs(selected_candidate->scalar_velocity) < stuck_velocity_threshold;
-          const bool stuck_candidate =
-            activation >= stuck_activation_threshold &&
-            next_state.branch_age_s >= stuck_time_threshold &&
-            low_progress &&
-            low_velocity;
-          if (stuck_candidate) {
-            next_state.stuck_timer_s += supervisor_dt;
-          } else {
-            next_state.stuck_timer_s =
-              std::max(0.0, next_state.stuck_timer_s - supervisor_dt);
-          }
-          const bool stuck_active =
-            next_state.stuck_timer_s >= stuck_time_threshold;
-          next_state.mode = stuck_active ? 2 : 1;
-
-          pending_supervisor_state = next_state;
-          pending_supervisor_update = true;
-          pending_blocked_point_index = point_index;
-          pending_blocked_slot = selected_candidate->slot;
-          pending_blocked_memory_set =
-            next_state.branch_age_s >= blocked_update_duration &&
-            branch_progress < blocked_progress_threshold &&
-            clearance_improvement < blocked_clearance_improvement;
-          pending_blocked_memory_clear =
-            !pending_blocked_memory_set &&
-            (branch_progress >= blocked_progress_threshold ||
-            clearance_improvement >= blocked_clearance_improvement);
-
-          stage4_supervisor_mode_id = static_cast<double>(next_state.mode);
-          stage4_hold_active =
-            same_branch &&
-            branch_hold_duration > 0.0 &&
-            next_state.branch_age_s <= branch_hold_duration ?
-            1.0 :
-            0.0;
-          stage4_hold_age_s = next_state.hold_age_s;
-          stage4_selected_hold_bonus = selected_candidate->hold_bonus;
-          stage4_stuck_score = stuck_candidate ? 1.0 : 0.0;
-          stage4_stuck_timer_s = next_state.stuck_timer_s;
-          stage4_stuck_active = stuck_active ? 1.0 : 0.0;
-          stage4_metric_boost = selected_candidate->metric_boost;
-          stage4_accel_boost = selected_candidate->accel_boost;
-          stage4_selected_blocked_penalty = selected_candidate->blocked_penalty;
-          stage4_branch_age_s = next_state.branch_age_s;
-          stage4_branch_progress_m = branch_progress;
-          stage4_clearance_improvement_m = clearance_improvement;
-        }
-
-        stage3_candidate_debug_values.reserve(candidates.size() * 29);
-        for (const auto & candidate : candidates) {
-          stage3_candidate_debug_values.push_back(static_cast<double>(candidate.slot));
-          stage3_candidate_debug_values.push_back(candidate.weight);
-          stage3_candidate_debug_values.push_back(candidate.score);
-          stage3_candidate_debug_values.push_back(candidate.goal_score);
-          stage3_candidate_debug_values.push_back(candidate.continuity_score);
-          stage3_candidate_debug_values.push_back(candidate.adjacent_risk);
-          stage3_candidate_debug_values.push_back(candidate.hold_bonus);
-          stage3_candidate_debug_values.push_back(candidate.blocked_penalty);
-          stage3_candidate_debug_values.push_back(candidate.stuck_bonus);
-          stage3_candidate_debug_values.push_back(candidate.base_score);
-          stage3_candidate_debug_values.push_back(candidate.applied_tangent.x());
-          stage3_candidate_debug_values.push_back(candidate.applied_tangent.y());
-          stage3_candidate_debug_values.push_back(candidate.applied_tangent.z());
-          stage3_candidate_debug_values.push_back(candidate.metric_scalar);
-          stage3_candidate_debug_values.push_back(candidate.metric_boost);
-          stage3_candidate_debug_values.push_back(candidate.accel_boost);
-          stage3_candidate_debug_values.push_back(1.0);
-          stage3_candidate_debug_values.push_back(candidate.duplicate_risk);
-          stage3_candidate_debug_values.push_back(candidate.scalar_s);
-          stage3_candidate_debug_values.push_back(candidate.scalar_velocity);
-          stage3_candidate_debug_values.push_back(candidate.scalar_error);
-          stage3_candidate_debug_values.push_back(candidate.potential_energy);
-          stage3_candidate_debug_values.push_back(candidate.kinetic_energy);
-          stage3_candidate_debug_values.push_back(candidate.lyapunov_energy);
-          stage3_candidate_debug_values.push_back(candidate.damping_vdot);
-          stage3_candidate_debug_values.push_back(candidate.weights_latched ? 1.0 : 0.0);
-          stage3_candidate_debug_values.push_back(
-            static_cast<double>(candidate.mode_generation));
-          stage3_candidate_debug_values.push_back(candidate.bounded_potential ? 1.0 : 0.0);
-          stage3_candidate_debug_values.push_back(candidate.mode_normal_dot_tangent);
-          stage3_candidate_debug_values.push_back(candidate.clearance_rate);
-          stage3_candidate_debug_values.push_back(candidate.collision_accel);
-          stage3_candidate_debug_values.push_back(candidate.scaled_collision_accel);
-        }
-      } else if (use_gds_branch) {
-        auto & mode_state = tangent_escape_gds_modes_[point_index];
-        if (!mode_state.active || !mode_state.tangent.allFinite()) {
-          mode_state.active = true;
-          mode_state.origin = control_point;
-          mode_state.tangent = tangent;
-        }
-        mode_state.activation = activation;
-        gds_mode_used[point_index] = 1;
-
-        mode_id = 2.0;
-        mode_origin = mode_state.origin;
-        applied_tangent = mode_state.tangent;
-        scalar_s = applied_tangent.dot(control_point - mode_origin);
-        scalar_target = escape_length;
-        scalar_velocity = applied_tangent.dot(point_velocity);
-        scalar_error = scalar_target - scalar_s;
-        desired_tangent_accel =
-          gds_position_gain * scalar_error - gds_damping_gain * scalar_velocity;
-        if (max_accel > 0.0) {
-          desired_tangent_accel = std::clamp(
-            desired_tangent_accel,
-            -max_accel,
-            max_accel);
-        }
-        desired_acceleration = desired_tangent_accel * applied_tangent;
-
-        const RowVector6 scalar_jacobian = applied_tangent.transpose() * point_jacobian;
-        const double scalar_curvature = applied_tangent.dot(point_curvature);
-        accumulate_scalar_leaf(
-          use_natural_rmp,
-          scalar_jacobian,
-          reported_effective_metric_scalar,
-          desired_tangent_accel,
-          scalar_curvature,
-          metric,
-          force);
-      } else {
-        desired_tangent_accel =
-          std::max(params.tangent_gain, 0.0) -
-          std::max(params.damping_gain, 0.0) * scalar_velocity;
-        if (max_accel > 0.0) {
-          desired_tangent_accel = std::clamp(
-            desired_tangent_accel,
-            -max_accel,
-            max_accel);
-        }
-        desired_acceleration = desired_tangent_accel * applied_tangent;
-        const Eigen::Matrix3d leaf_metric =
-          effective_metric_scalar * (applied_tangent * applied_tangent.transpose());
-        if (leaf_metric.cwiseAbs().maxCoeff() <= 0.0) {
-          continue;
-        }
-
-        accumulate_vector_leaf(
-          use_natural_rmp,
-          point_jacobian,
-          leaf_metric,
-          desired_acceleration,
-          point_curvature,
-          metric,
-          force);
-      }
-
-      if (debug_score > best_debug_score) {
-        best_debug_score = debug_score;
-        best_debug_data = {
-          1.0,
-          static_cast<double>(point_index),
-          clearance,
-          beta,
-          proximity_activation,
-          blocking_activation,
-          activation,
-          debug_score,
-          scalar_velocity,
-          desired_tangent_accel,
-          reported_effective_metric_scalar,
-          control_point.x(),
-          control_point.y(),
-          control_point.z(),
-          obstacle.center.x(),
-          obstacle.center.y(),
-          obstacle.center.z(),
-          collision_normal.x(),
-          collision_normal.y(),
-          collision_normal.z(),
-          applied_tangent.x(),
-          applied_tangent.y(),
-          applied_tangent.z(),
-          desired_acceleration.x(),
-          desired_acceleration.y(),
-          desired_acceleration.z(),
-          mode_id,
-          scalar_s,
-          scalar_target,
-          scalar_velocity,
-          scalar_error,
-          mode_origin.x(),
-          mode_origin.y(),
-          mode_origin.z(),
-          applied_tangent.x(),
-          applied_tangent.y(),
-          applied_tangent.z(),
-          stage3_candidate_count,
-          stage3_selected_candidate_index,
-          stage3_selected_weight,
-          stage3_selected_score,
-          stage3_selected_goal_score,
-          stage3_selected_continuity_score,
-          stage3_selected_adjacent_risk,
-          softmax_beta,
-          stage3_branch_weight_sum,
-          stage3_weight_entropy,
-          stage4_supervisor_mode_id,
-          stage4_hold_active,
-          stage4_hold_age_s,
-          stage4_selected_hold_bonus,
-          stage4_stuck_score,
-          stage4_stuck_timer_s,
-          stage4_stuck_active,
-          stage4_metric_boost,
-          stage4_accel_boost,
-          stage4_selected_blocked_penalty,
-          stage4_max_blocked_memory,
-          stage4_branch_age_s,
-          stage4_branch_progress_m,
-          stage4_clearance_improvement_m,
-        };
-        best_debug_data.insert(
-          best_debug_data.end(),
-          stage3_candidate_debug_values.begin(),
-          stage3_candidate_debug_values.end());
-      }
-    }
-  }
-
-  if (use_gds_branch) {
-    for (std::size_t index = 0; index < tangent_escape_gds_modes_.size(); ++index) {
-      if (!gds_mode_used[index]) {
-        tangent_escape_gds_modes_[index].active = false;
-        tangent_escape_gds_modes_[index].activation = 0.0;
-      }
-    }
-  }
-  if (use_softmax_gds_branch) {
-    for (std::size_t point_index = 0; point_index < tangent_escape_softmax_gds_modes_.size();
-      ++point_index)
-    {
-      for (std::size_t slot = 0; slot < tangent_escape_softmax_candidate_count_; ++slot) {
-        if (!softmax_mode_used[point_index][slot]) {
-          tangent_escape_softmax_gds_modes_[point_index][slot].active = false;
-          tangent_escape_softmax_gds_modes_[point_index][slot].activation = 0.0;
-        }
-      }
-    }
-  }
-  if (use_stage4_supervisor && !std::isfinite(best_debug_score)) {
-    advance_supervisor_recovery();
-  } else if (use_stage4_supervisor) {
-    if (pending_supervisor_update) {
-      tangent_escape_supervisor_ = pending_supervisor_state;
-      auto & memory =
-        tangent_escape_blocked_memory_[pending_blocked_point_index][pending_blocked_slot];
-      bool blocked_memory_changed = false;
-      if (pending_blocked_memory_set) {
-        blocked_memory_changed = memory < 0.5;
-        memory = std::max(memory, 1.0);
-      } else if (pending_blocked_memory_clear) {
-        blocked_memory_changed = memory > 0.5;
-        memory *= 0.5;
-      }
-      if (use_stable_hybrid_gds && blocked_memory_changed) {
-        for (auto & mode : tangent_escape_softmax_gds_modes_[pending_blocked_point_index]) {
-          mode.active = false;
-          mode.activation = 0.0;
-        }
-      }
-      if (best_debug_data.size() > 57) {
-        best_debug_data[57] = max_blocked_memory();
-      }
-    }
-    tangent_escape_supervisor_.recovery_timer_s = 0.0;
-  } else {
-    tangent_escape_supervisor_.active = false;
-    tangent_escape_supervisor_.mode = 0;
-  }
-
-  if (debug_data != nullptr) {
-    *debug_data = best_debug_data;
-  }
+  throw std::runtime_error(
+          "Unsupported tangent Escape acceleration model: " +
+          config_.tangent_escape.acceleration_model);
 }
 
 void PinocchioDirectRmpSolver::accumulate_joint_damping(

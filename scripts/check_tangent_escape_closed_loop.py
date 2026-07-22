@@ -2,6 +2,7 @@
 import argparse
 import csv
 import math
+import statistics
 from collections import Counter
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -35,13 +36,40 @@ REQUIRED_COLUMNS = [
     "time_ros_s",
     "tangent_escape_rmp_active",
     "tangent_escape_rmp_control_point_index",
-    "tangent_escape_rmp_leaf_mode_id",
+    "tangent_escape_rmp_schema_id",
     "tangent_escape_rmp_activation",
+    "tangent_escape_rmp_raw_activation",
     "tangent_escape_rmp_clearance_m",
-    "tangent_escape_rmp_scalar_s_m",
-    "tangent_escape_rmp_scalar_target_m",
-    "tangent_escape_rmp_scalar_error_m",
+    "tangent_escape_rmp_beta",
+    "tangent_escape_rmp_effective_metric_scalar",
+    "tangent_escape_rmp_canonical_coordinate_m",
+    "tangent_escape_rmp_velocity_reference_m_s",
+    "tangent_escape_rmp_scalar_velocity_m_s",
+    "tangent_escape_rmp_velocity_error_m_s",
     "tangent_escape_rmp_desired_tangent_accel_m_s2",
+    "tangent_escape_rmp_alpha_stuck",
+    "tangent_escape_rmp_z",
+    "tangent_escape_rmp_lambda",
+    "tangent_escape_rmp_drive_ramp",
+    "tangent_escape_rmp_release_brake",
+    "tangent_escape_rmp_state_mode_id",
+    "tangent_escape_rmp_handoff_phase_id",
+    "tangent_escape_rmp_handoff_reason_id",
+    "tangent_escape_rmp_candidate_count",
+    "tangent_escape_rmp_selected_candidate_feasible",
+    "tangent_escape_rmp_selected_candidate_score",
+    "tangent_escape_rmp_selected_sector_risk",
+    "tangent_escape_rmp_selected_blocked_penalty",
+    "tangent_escape_rmp_max_blocked_memory",
+    "tangent_escape_rmp_command_distance_m",
+    "tangent_escape_rmp_actual_distance_m",
+    "tangent_escape_rmp_move_ratio",
+    "tangent_escape_rmp_normal_x",
+    "tangent_escape_rmp_normal_y",
+    "tangent_escape_rmp_normal_z",
+    "tangent_escape_rmp_tangent_x",
+    "tangent_escape_rmp_tangent_y",
+    "tangent_escape_rmp_tangent_z",
     "rmp_joint_accel_1_rad_s2",
     "rmp_joint_accel_2_rad_s2",
     "rmp_joint_accel_3_rad_s2",
@@ -58,10 +86,6 @@ def parse_float(row: Dict[str, str], key: str) -> float:
         return float("nan")
 
 
-def is_finite(value: float) -> bool:
-    return math.isfinite(value)
-
-
 def finite_values(values: Iterable[float]) -> List[float]:
     return [value for value in values if math.isfinite(value)]
 
@@ -70,6 +94,39 @@ def norm(values: Sequence[float]) -> float:
     if any(not math.isfinite(value) for value in values):
         return float("nan")
     return math.sqrt(sum(value * value for value in values))
+
+
+def vector_angle_degrees(
+    lhs: Sequence[float],
+    rhs: Sequence[float],
+    minimum_norm: float,
+) -> float:
+    lhs_norm = norm(lhs)
+    rhs_norm = norm(rhs)
+    if (
+        not math.isfinite(lhs_norm) or
+        not math.isfinite(rhs_norm) or
+        lhs_norm <= minimum_norm or
+        rhs_norm <= minimum_norm
+    ):
+        return float("nan")
+    cosine = sum(left * right for left, right in zip(lhs, rhs)) / (
+        lhs_norm * rhs_norm
+    )
+    return math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
+
+
+def percentile(values: Sequence[float], fraction: float) -> float:
+    finite = sorted(finite_values(values))
+    if not finite:
+        return float("nan")
+    position = (len(finite) - 1) * min(max(fraction, 0.0), 1.0)
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return finite[lower]
+    weight = position - lower
+    return finite[lower] * (1.0 - weight) + finite[upper] * weight
 
 
 def fmt(value: float, digits: int = 4) -> str:
@@ -153,6 +210,20 @@ def qdd_norm(row: Dict[str, str]) -> float:
     return norm(qdd_vector(row))
 
 
+def dual_qdd_vector(row: Dict[str, str], variant: str) -> List[float]:
+    return [
+        parse_float(row, f"tangent_escape_qdd_{variant}_{index}_rad_s2")
+        for index in range(1, 7)
+    ]
+
+
+def dual_cp_accel_vector(row: Dict[str, str], variant: str) -> List[float]:
+    return [
+        parse_float(row, f"tangent_escape_cp_accel_{variant}_{axis}_m_s2")
+        for axis in ("x", "y", "z")
+    ]
+
+
 def goal_error(row: Dict[str, str]) -> float:
     value = parse_float(row, "goal_error_m")
     if math.isfinite(value):
@@ -234,24 +305,44 @@ def sensor_name(index: int) -> str:
     return "unknown"
 
 
-def make_report(rows: List[Dict[str, str]], fieldnames: List[str], path: Path, args: argparse.Namespace) -> int:
+def make_report(
+    rows: List[Dict[str, str]],
+    fieldnames: List[str],
+    path: Path,
+    args: argparse.Namespace,
+) -> int:
     if not rows:
         print(f"Input CSV: {path}")
         print("Error: CSV has no rows")
         return 1
 
     intervals = active_intervals(rows)
-    active_indices = [index for start, end in intervals for index in range(start, end + 1)]
+    active_indices = [
+        index
+        for start, end in intervals
+        for index in range(start, end + 1)
+    ]
     active_rows = [rows[index] for index in active_indices]
     start_time = row_time(rows[0])
     end_time = row_time(rows[-1])
-    duration = end_time - start_time if math.isfinite(start_time) and math.isfinite(end_time) else float("nan")
+    duration = (
+        end_time - start_time
+        if math.isfinite(start_time) and math.isfinite(end_time)
+        else float("nan")
+    )
 
     def rel_time(index: int) -> float:
         value = row_time(rows[index])
         if math.isfinite(value) and math.isfinite(start_time):
             return value - start_time
         return float("nan")
+
+    def count_summary(values: Sequence[float]) -> str:
+        counts = Counter(int(round(value)) for value in values)
+        return ", ".join(
+            f"{identifier}:{count}"
+            for identifier, count in sorted(counts.items())
+        ) or "none"
 
     print(f"Input CSV: {path}")
     print(f"Rows: {len(rows)}")
@@ -265,171 +356,396 @@ def make_report(rows: List[Dict[str, str]], fieldnames: List[str], path: Path, a
 
     cp_counts: Counter[int] = Counter()
     mode_counts: Counter[int] = Counter()
-    for row in active_rows:
-        cp = parse_float(row, "tangent_escape_rmp_control_point_index")
-        mode = parse_float(row, "tangent_escape_rmp_leaf_mode_id")
-        if math.isfinite(cp):
-            cp_counts[int(round(cp))] += 1
+    invalid_mode_rows: List[int] = []
+    for source_index, row in zip(active_indices, active_rows):
+        control_point = parse_float(row, "tangent_escape_rmp_control_point_index")
+        mode = parse_float(row, "tangent_escape_rmp_schema_id")
+        if math.isfinite(control_point):
+            cp_counts[int(round(control_point))] += 1
         if math.isfinite(mode):
-            mode_counts[int(round(mode))] += 1
+            mode_id = int(round(mode))
+            mode_counts[mode_id] += 1
+            if mode_id != 6:
+                invalid_mode_rows.append(source_index)
+        else:
+            invalid_mode_rows.append(source_index)
 
-    total_active_duration = sum(interval_duration(rows, start, end) for start, end in intervals)
-    print("Tangent Escape RMP:")
+    total_active_duration = sum(
+        interval_duration(rows, start, end)
+        for start, end in intervals
+    )
+    print("Canonical Tangent Escape RMP:")
     print(f"  active rows: {len(active_rows)}")
     print(f"  active intervals: {len(intervals)}")
     print(f"  active duration: {fmt(total_active_duration)} s")
-    for idx, (start, end) in enumerate(intervals, start=1):
+    for interval_index, (start, end) in enumerate(intervals, start=1):
         print(
-            f"  interval {idx}: rows {start}-{end}, "
+            f"  interval {interval_index}: rows {start}-{end}, "
             f"t_rel={fmt(rel_time(start))}-{fmt(rel_time(end))}, "
             f"duration={fmt(interval_duration(rows, start, end))} s"
         )
     print(
         "  control points: " +
-        ", ".join(f"{index}({sensor_name(index)}):{count}" for index, count in sorted(cp_counts.items()))
+        ", ".join(
+            f"{index}({sensor_name(index)}):{count}"
+            for index, count in sorted(cp_counts.items())
+        )
     )
-    print("  mode ids: " + ", ".join(f"{mode}:{count}" for mode, count in sorted(mode_counts.items())))
+    print(
+        "  wire schema ids: " +
+        ", ".join(
+            f"{mode}:{count}"
+            for mode, count in sorted(mode_counts.items())
+        )
+    )
     print("")
 
-    print("GDS Scalar:")
-    print("  activation: " + fmt_range([parse_float(row, "tangent_escape_rmp_activation") for row in active_rows]))
-    print("  clearance_m: " + fmt_range([parse_float(row, "tangent_escape_rmp_clearance_m") for row in active_rows]))
-    print("  beta: " + fmt_range([parse_float(row, "tangent_escape_rmp_beta") for row in active_rows]))
-    scalar_s = [parse_float(row, "tangent_escape_rmp_scalar_s_m") for row in active_rows]
-    scalar_target = [parse_float(row, "tangent_escape_rmp_scalar_target_m") for row in active_rows]
-    scalar_error = [parse_float(row, "tangent_escape_rmp_scalar_error_m") for row in active_rows]
-    desired_accel = [
-        parse_float(row, "tangent_escape_rmp_desired_tangent_accel_m_s2")
-        for row in active_rows
-    ]
-    print("  scalar_s_m: " + fmt_range(scalar_s))
-    print("  scalar_target_m: " + fmt_range(scalar_target))
-    print("  scalar_error_m: " + fmt_range(scalar_error))
-    print("  desired_tangent_accel_m_s2: " + fmt_range(desired_accel))
-    target_values = finite_values(scalar_target)
-    s_values = finite_values(scalar_s)
-    target_reached = bool(target_values and s_values and max(s_values) >= 0.8 * target_values[0])
-    target_crossed = bool(finite_values(scalar_error) and min(finite_values(scalar_error)) <= 0.0)
-    print(f"  reached_80pct_target: {target_reached}")
-    print(f"  crossed_target: {target_crossed}")
+    if invalid_mode_rows:
+        preview = ", ".join(str(index) for index in invalid_mode_rows[:8])
+        suffix = "..." if len(invalid_mode_rows) > 8 else ""
+        print("Result:")
+        print("  STRUCTURE_OK: no")
+        print(
+            "  ERROR: active records must use canonical wire schema ID 6; "
+            f"invalid rows: {preview}{suffix}"
+        )
+        return 1
 
-    normal_dot_tangent = [
-        vector_dot(row, "tangent_escape_rmp_normal", "tangent_escape_rmp_tangent")
+    print("Canonical Velocity Tracking:")
+    for label, field in [
+        ("activation", "tangent_escape_rmp_activation"),
+        ("raw_activation", "tangent_escape_rmp_raw_activation"),
+        ("clearance_m", "tangent_escape_rmp_clearance_m"),
+        ("beta", "tangent_escape_rmp_beta"),
+        ("metric_scalar", "tangent_escape_rmp_effective_metric_scalar"),
+        ("canonical_coordinate_m", "tangent_escape_rmp_canonical_coordinate_m"),
+        ("velocity_reference_m_s", "tangent_escape_rmp_velocity_reference_m_s"),
+        ("scalar_velocity_m_s", "tangent_escape_rmp_scalar_velocity_m_s"),
+        ("velocity_error_m_s", "tangent_escape_rmp_velocity_error_m_s"),
+        (
+            "desired_tangent_accel_m_s2",
+            "tangent_escape_rmp_desired_tangent_accel_m_s2",
+        ),
+        ("alpha_stuck", "tangent_escape_rmp_alpha_stuck"),
+        ("z", "tangent_escape_rmp_z"),
+        ("lambda", "tangent_escape_rmp_lambda"),
+        ("drive_ramp", "tangent_escape_rmp_drive_ramp"),
+        ("release_brake", "tangent_escape_rmp_release_brake"),
+        ("command_distance_m", "tangent_escape_rmp_command_distance_m"),
+        ("actual_distance_m", "tangent_escape_rmp_actual_distance_m"),
+        ("move_ratio", "tangent_escape_rmp_move_ratio"),
+    ]:
+        print(
+            f"  {label}: " +
+            fmt_range([parse_float(row, field) for row in active_rows])
+        )
+
+    normal_dot_tangent = finite_values(
+        vector_dot(
+            row,
+            "tangent_escape_rmp_normal",
+            "tangent_escape_rmp_tangent",
+        )
         for row in active_rows
-    ]
-    normal_dot_tangent = finite_values(normal_dot_tangent)
+    )
+    drive_normal_dot_tangent = finite_values(
+        vector_dot(
+            row,
+            "tangent_escape_rmp_normal",
+            "tangent_escape_rmp_tangent",
+        )
+        for row in active_rows
+        if parse_float(row, "tangent_escape_rmp_handoff_phase_id") in (1.0, 2.0)
+    )
     if normal_dot_tangent:
-        print(f"  max_abs_normal_dot_tangent: {fmt(max(abs(value) for value in normal_dot_tangent))}")
+        print(
+            "  max_abs_normal_dot_tangent_all_phases: " +
+            fmt(max(abs(value) for value in normal_dot_tangent))
+        )
+    if drive_normal_dot_tangent:
+        print(
+            "  max_abs_normal_dot_tangent_engage_drive: " +
+            fmt(max(abs(value) for value in drive_normal_dot_tangent))
+        )
     logged_normal_dot = finite_values(
-        parse_float(row, "tangent_escape_rmp_normal_dot_tangent") for row in active_rows
+        parse_float(row, "tangent_escape_rmp_normal_dot_tangent")
+        for row in active_rows
     )
     if logged_normal_dot:
-        print(
-            "  logged_normal_dot_tangent: " +
-            fmt_range(logged_normal_dot)
-        )
+        print("  logged_normal_dot_tangent: " + fmt_range(logged_normal_dot))
     print("")
 
     candidate_count = finite_values(
-        parse_float(row, "tangent_escape_rmp_candidate_count") for row in active_rows
+        parse_float(row, "tangent_escape_rmp_candidate_count")
+        for row in active_rows
     )
-    selected_weight = finite_values(
-        parse_float(row, "tangent_escape_rmp_selected_candidate_weight") for row in active_rows
+    selected_feasible = finite_values(
+        parse_float(row, "tangent_escape_rmp_selected_candidate_feasible")
+        for row in active_rows
     )
     selected_score = finite_values(
-        parse_float(row, "tangent_escape_rmp_selected_candidate_score") for row in active_rows
+        parse_float(row, "tangent_escape_rmp_selected_candidate_score")
+        for row in active_rows
     )
-    selected_adjacent_risk = finite_values(
-        parse_float(row, "tangent_escape_rmp_selected_adjacent_risk") for row in active_rows
+    selected_risk = finite_values(
+        parse_float(row, "tangent_escape_rmp_selected_sector_risk")
+        for row in active_rows
     )
     score_gap = finite_values(
-        parse_float(row, "tangent_escape_rmp_selected_score_gap") for row in active_rows
-    )
-    weight_gap = finite_values(
-        parse_float(row, "tangent_escape_rmp_selected_weight_gap") for row in active_rows
+        parse_float(row, "tangent_escape_rmp_selected_score_gap")
+        for row in active_rows
     )
     max_candidate_normal_dot = finite_values(
         parse_float(row, "tangent_escape_rmp_max_abs_candidate_normal_dot_tangent")
         for row in active_rows
     )
-    if candidate_count:
-        print("Stage-3 Score/Softmax:")
-        print("  candidate_count: " + fmt_range(candidate_count))
-        print("  selected_weight: " + fmt_range(selected_weight))
-        print("  selected_score: " + fmt_range(selected_score))
-        print("  selected_adjacent_risk: " + fmt_range(selected_adjacent_risk))
-        if score_gap:
-            print("  selected_score_gap: " + fmt_range(score_gap))
-        if weight_gap:
-            print("  selected_weight_gap: " + fmt_range(weight_gap))
-        if max_candidate_normal_dot:
-            print(
-                "  max_abs_candidate_normal_dot_tangent: " +
-                fmt_range(max_candidate_normal_dot)
-            )
-        print(
-            "  adjacent_risk_nonzero_rows: " +
-            str(sum(1 for value in selected_adjacent_risk if abs(value) > 1e-9))
-        )
-        print("")
-
-    supervisor_modes = finite_values(
-        parse_float(row, "tangent_escape_rmp_supervisor_mode_id") for row in active_rows
+    print("Canonical Candidate Score:")
+    print("  candidate_count: " + fmt_range(candidate_count))
+    print("  selected_feasible: " + fmt_range(selected_feasible))
+    print("  selected_score: " + fmt_range(selected_score))
+    print("  selected_sector_risk: " + fmt_range(selected_risk))
+    print("  selected_score_gap: " + fmt_range(score_gap))
+    print(
+        "  max_abs_candidate_normal_dot_tangent: " +
+        fmt_range(max_candidate_normal_dot)
     )
-    if supervisor_modes:
-        supervisor_mode_counts = Counter(int(round(value)) for value in supervisor_modes)
-        hold_active = finite_values(
-            parse_float(row, "tangent_escape_rmp_hold_active") for row in active_rows
-        )
-        hold_bonus = finite_values(
-            parse_float(row, "tangent_escape_rmp_selected_hold_bonus") for row in active_rows
-        )
-        stuck_active = finite_values(
-            parse_float(row, "tangent_escape_rmp_stuck_active") for row in active_rows
-        )
-        stuck_timer = finite_values(
-            parse_float(row, "tangent_escape_rmp_stuck_timer_s") for row in active_rows
-        )
-        metric_boost = finite_values(
-            parse_float(row, "tangent_escape_rmp_metric_boost") for row in active_rows
-        )
-        accel_boost = finite_values(
-            parse_float(row, "tangent_escape_rmp_accel_boost") for row in active_rows
-        )
-        blocked_penalty = finite_values(
-            parse_float(row, "tangent_escape_rmp_selected_blocked_penalty")
-            for row in active_rows
-        )
-        blocked_memory = finite_values(
-            parse_float(row, "tangent_escape_rmp_max_blocked_memory") for row in active_rows
-        )
-        branch_age = finite_values(
-            parse_float(row, "tangent_escape_rmp_branch_age_s") for row in active_rows
-        )
-        branch_progress = finite_values(
-            parse_float(row, "tangent_escape_rmp_branch_progress_m") for row in active_rows
-        )
-        print("Stage-4 Supervisor:")
-        print(
-            "  modes: " +
-            ", ".join(
-                f"{mode}:{count}" for mode, count in sorted(supervisor_mode_counts.items())
-            )
-        )
-        print("  hold_active_rows: " + str(sum(1 for value in hold_active if value >= 0.5)))
-        print("  selected_hold_bonus: " + fmt_range(hold_bonus))
-        print("  stuck_active_rows: " + str(sum(1 for value in stuck_active if value >= 0.5)))
-        print("  stuck_timer_s: " + fmt_range(stuck_timer))
-        print("  metric_boost: " + fmt_range(metric_boost))
-        print("  accel_boost: " + fmt_range(accel_boost))
-        print("  selected_blocked_penalty: " + fmt_range(blocked_penalty))
-        print("  max_blocked_memory: " + fmt_range(blocked_memory))
-        print("  branch_age_s: " + fmt_range(branch_age))
-        print("  branch_progress_m: " + fmt_range(branch_progress))
-        print("")
+    print(
+        "  sector_risk_nonzero_rows: " +
+        str(sum(1 for value in selected_risk if abs(value) > 1e-9))
+    )
+    print("")
 
-    qdd_norms = [qdd_norm(row) for row in active_rows]
-    qdd_norms = finite_values(qdd_norms)
+    dual_column_present = "tangent_escape_dual_solve_active" in fieldnames
+    dual_rows = [
+        row
+        for row in active_rows
+        if parse_float(row, "tangent_escape_dual_solve_active") >= 0.5
+    ]
+    dual_drive_rows = [
+        row
+        for row in dual_rows
+        if int(round(parse_float(row, "tangent_escape_rmp_handoff_phase_id"))) in (1, 2)
+    ]
+    dual_no_effect = False
+    print("Same-State Collision-only vs Collision+Escape:")
+    if not dual_column_present or not dual_rows:
+        print("  data: unavailable")
+        print(
+            "  record with publish_tangent_escape_dual_solve_data:=true "
+            "to measure the post-limit Escape contribution"
+        )
+    else:
+        effect_rows = dual_drive_rows or dual_rows
+        delta_qdd = finite_values(
+            parse_float(row, "tangent_escape_delta_qdd_norm")
+            for row in effect_rows
+        )
+        delta_cp = finite_values(
+            parse_float(row, "tangent_escape_delta_cp_accel_norm_m_s2")
+            for row in effect_rows
+        )
+        delta_cp_tangent = finite_values(
+            parse_float(row, "tangent_escape_delta_cp_accel_dot_tangent_m_s2")
+            for row in effect_rows
+        )
+        delta_cp_normal = finite_values(
+            parse_float(row, "tangent_escape_delta_cp_accel_dot_normal_m_s2")
+            for row in effect_rows
+        )
+        final_qdd_direction_change = finite_values(
+            vector_angle_degrees(
+                dual_qdd_vector(row, "with"),
+                dual_qdd_vector(row, "without"),
+                0.1,
+            )
+            for row in effect_rows
+        )
+        final_cp_direction_change = finite_values(
+            vector_angle_degrees(
+                dual_cp_accel_vector(row, "with"),
+                dual_cp_accel_vector(row, "without"),
+                0.01,
+            )
+            for row in effect_rows
+        )
+        relative_qdd = finite_values(
+            parse_float(row, "tangent_escape_delta_qdd_norm") /
+            max(parse_float(row, "tangent_escape_qdd_without_norm"), 1e-9)
+            for row in effect_rows
+            if math.isfinite(parse_float(row, "tangent_escape_delta_qdd_norm")) and
+            math.isfinite(parse_float(row, "tangent_escape_qdd_without_norm"))
+        )
+        unchanged_rows = sum(
+            value <= args.dual_effect_epsilon
+            for value in delta_qdd
+        )
+        positive_tangent_rows = sum(value > 0.0 for value in delta_cp_tangent)
+        print(f"  active rows: {len(dual_rows)} (drive={len(dual_drive_rows)})")
+        print("  delta_qdd_norm_rad_s2: " + fmt_range(delta_qdd))
+        print("  relative_qdd_change: " + fmt_range(relative_qdd))
+        print("  delta_cp_accel_norm_m_s2: " + fmt_range(delta_cp))
+        print("  delta_cp_accel_dot_tangent_m_s2: " + fmt_range(delta_cp_tangent))
+        print("  delta_cp_accel_dot_normal_m_s2: " + fmt_range(delta_cp_normal))
+        if final_qdd_direction_change:
+            print(
+                "  final_qdd_direction_change_deg: "
+                f"median={fmt(statistics.median(final_qdd_direction_change))} "
+                f"p95={fmt(percentile(final_qdd_direction_change, 0.95))} "
+                f"max={fmt(max(final_qdd_direction_change))} "
+                f"ge30={sum(value >= 30.0 for value in final_qdd_direction_change)}/"
+                f"{len(final_qdd_direction_change)}"
+            )
+        if final_cp_direction_change:
+            print(
+                "  final_cp_accel_direction_change_deg: "
+                f"median={fmt(statistics.median(final_cp_direction_change))} "
+                f"p95={fmt(percentile(final_cp_direction_change, 0.95))} "
+                f"max={fmt(max(final_cp_direction_change))} "
+                f"ge30={sum(value >= 30.0 for value in final_cp_direction_change)}/"
+                f"{len(final_cp_direction_change)} "
+                f"ge90={sum(value >= 90.0 for value in final_cp_direction_change)}/"
+                f"{len(final_cp_direction_change)}"
+            )
+        if delta_qdd:
+            print(
+                "  post-limit unchanged rows: "
+                f"{unchanged_rows}/{len(delta_qdd)}"
+            )
+            print(
+                "  median relative qdd change: "
+                f"{fmt(statistics.median(relative_qdd))}"
+                if relative_qdd else
+                "  median relative qdd change: n/a"
+            )
+        if delta_cp_tangent:
+            print(
+                "  positive tangent contribution rows: "
+                f"{positive_tangent_rows}/{len(delta_cp_tangent)}"
+            )
+        dual_no_effect = bool(delta_qdd) and unchanged_rows == len(delta_qdd)
+    print("")
+
+    state_modes = finite_values(
+        parse_float(row, "tangent_escape_rmp_state_mode_id")
+        for row in active_rows
+    )
+    handoff_phases = finite_values(
+        parse_float(row, "tangent_escape_rmp_handoff_phase_id")
+        for row in active_rows
+    )
+    handoff_reasons = finite_values(
+        parse_float(row, "tangent_escape_rmp_handoff_reason_id")
+        for row in active_rows
+    )
+    blocked_penalty = finite_values(
+        parse_float(row, "tangent_escape_rmp_selected_blocked_penalty")
+        for row in active_rows
+    )
+    blocked_memory = finite_values(
+        parse_float(row, "tangent_escape_rmp_max_blocked_memory")
+        for row in active_rows
+    )
+    print("Canonical State Machine:")
+    print("  states: " + count_summary(state_modes))
+    print("  handoff_phases: " + count_summary(handoff_phases))
+    print("  handoff_reasons: " + count_summary(handoff_reasons))
+    print("  selected_blocked_penalty: " + fmt_range(blocked_penalty))
+    print("  max_blocked_memory: " + fmt_range(blocked_memory))
+
+    handoff_changes = 0
+    handoff_violations: List[int] = []
+    handoff_unobservable: List[int] = []
+    for previous_index, current_index in zip(active_indices, active_indices[1:]):
+        if current_index != previous_index + 1:
+            continue
+        previous = rows[previous_index]
+        current = rows[current_index]
+        previous_cp = parse_float(
+            previous,
+            "tangent_escape_rmp_control_point_index",
+        )
+        current_cp = parse_float(
+            current,
+            "tangent_escape_rmp_control_point_index",
+        )
+        previous_tangent = [
+            parse_float(previous, f"tangent_escape_rmp_tangent_{axis}")
+            for axis in ("x", "y", "z")
+        ]
+        current_tangent = [
+            parse_float(current, f"tangent_escape_rmp_tangent_{axis}")
+            for axis in ("x", "y", "z")
+        ]
+        cp_changed = (
+            math.isfinite(previous_cp) and
+            math.isfinite(current_cp) and
+            int(round(previous_cp)) != int(round(current_cp))
+        )
+        tangent_delta = norm([
+            current_tangent[axis] - previous_tangent[axis]
+            for axis in range(3)
+        ])
+        tangent_changed = (
+            math.isfinite(tangent_delta) and
+            tangent_delta > args.handoff_tangent_change
+        )
+        if not cp_changed and not tangent_changed:
+            continue
+        handoff_changes += 1
+        previous_time = row_time(previous)
+        current_time = row_time(current)
+        if (
+            not math.isfinite(previous_time) or
+            not math.isfinite(current_time) or
+            current_time - previous_time <= 0.0 or
+            current_time - previous_time > args.handoff_fresh_dt
+        ):
+            handoff_unobservable.append(current_index)
+            continue
+        # The controller completes lambda-down, sets the old branch to zero,
+        # swaps the CP/tangent, and evaluates the new branch in one solve
+        # cycle.  Consequently, the row that first contains the new branch
+        # must have zero effect; the immediately preceding old-branch row may
+        # still have a small nonzero ramp value.
+        current_lambda = parse_float(
+            current,
+            "tangent_escape_rmp_lambda",
+        )
+        current_metric = parse_float(
+            current,
+            "tangent_escape_rmp_effective_metric_scalar",
+        )
+        current_zero_effect = (
+            math.isfinite(current_lambda) and
+            math.isfinite(current_metric) and
+            abs(current_lambda) <= args.handoff_lambda_tolerance and
+            abs(current_metric) <= args.handoff_metric_tolerance
+        )
+        if current_zero_effect:
+            continue
+
+        # A logger running no faster than the controller can miss the exact
+        # switch cycle and first observe the new branch after its ENGAGE ramp
+        # has begun.  Without a controller-cycle sequence/switch flag this is
+        # unobservable, not evidence that the controller switched at nonzero
+        # effect.
+        current_phase = parse_float(
+            current,
+            "tangent_escape_rmp_handoff_phase_id",
+        )
+        if math.isfinite(current_phase) and int(round(current_phase)) == 1:
+            handoff_unobservable.append(current_index)
+        else:
+            handoff_violations.append(current_index)
+    print(f"  detected CP/tangent changes: {handoff_changes}")
+    print(f"  zero-effect handoff violations: {len(handoff_violations)}")
+    print(
+        "  zero-effect handoffs unobservable at logger rate: "
+        f"{len(handoff_unobservable)}"
+    )
+    print("")
+
+    qdd_norms = finite_values(qdd_norm(row) for row in active_rows)
     all_qdd_norms = finite_values(qdd_norm(row) for row in rows)
     saturation_threshold = args.qdd_limit * args.saturation_ratio
     saturation_rows: List[Tuple[int, float, List[int]]] = []
@@ -438,44 +754,62 @@ def make_report(rows: List[Dict[str, str]], fieldnames: List[str], path: Path, a
         if not all(math.isfinite(value) for value in values):
             continue
         joints = [
-            joint + 1 for joint, value in enumerate(values)
+            joint + 1
+            for joint, value in enumerate(values)
             if abs(value) >= saturation_threshold
         ]
         if joints:
-            saturation_rows.append((index, max(abs(value) for value in values), joints))
+            saturation_rows.append(
+                (index, max(abs(value) for value in values), joints)
+            )
 
     jerk, jerk_index = max_jerk(rows)
-    active_saturation = [item for item in saturation_rows if item[0] in active_indices]
+    active_index_set = set(active_indices)
+    active_saturation = [
+        item
+        for item in saturation_rows
+        if item[0] in active_index_set
+    ]
     print("Closed Loop Motion:")
     print("  active qdd_norm: " + fmt_range(qdd_norms))
     print("  all qdd_norm: " + fmt_range(all_qdd_norms))
     print(
         f"  qdd saturation rows: {len(saturation_rows)} "
-        f"(active={len(active_saturation)}, threshold={fmt(saturation_threshold)} rad/s^2)"
+        f"(active={len(active_saturation)}, "
+        f"threshold={fmt(saturation_threshold)} rad/s^2)"
     )
     if saturation_rows:
         first_index, max_abs, joints = saturation_rows[0]
         print(
-            f"  first saturation: row={first_index} t_rel={fmt(rel_time(first_index))} "
+            f"  first saturation: row={first_index} "
+            f"t_rel={fmt(rel_time(first_index))} "
             f"max_abs={fmt(max_abs)} joints={joints}"
         )
     print(f"  max qdd jerk estimate: {fmt(jerk)} rad/s^3")
     if jerk_index is not None:
         print(f"  max jerk row pair starts at: {jerk_index}")
 
-    first_start, first_end = intervals[0]
-    last_start, last_end = intervals[-1]
-    goal_before = nearest_finite_goal_error(rows, max(first_start - 1, 0), -1)
+    first_start = intervals[0][0]
+    last_end = intervals[-1][1]
+    goal_before = nearest_finite_goal_error(
+        rows,
+        max(first_start - 1, 0),
+        -1,
+    )
     goal_start = nearest_finite_goal_error(rows, first_start, 1)
     goal_end = nearest_finite_goal_error(rows, last_end, -1)
-    goal_after = nearest_finite_goal_error(rows, min(last_end + 1, len(rows) - 1), 1)
+    goal_after = nearest_finite_goal_error(
+        rows,
+        min(last_end + 1, len(rows) - 1),
+        1,
+    )
     goal_final = nearest_finite_goal_error(rows, len(rows) - 1, -1)
     print(f"  goal_error_before_active_m: {fmt(goal_before)}")
     print(f"  goal_error_start_m: {fmt(goal_start)}")
     print(f"  goal_error_end_m: {fmt(goal_end)}")
     print(f"  goal_error_after_active_m: {fmt(goal_after)}")
     print(f"  goal_error_final_m: {fmt(goal_final)}")
-    released_before_end = intervals[-1][1] < len(rows) - 1
+    released_before_end = last_end < len(rows) - 1
     print(f"  escape_released_before_log_end: {released_before_end}")
     print("")
 
@@ -487,14 +821,29 @@ def make_report(rows: List[Dict[str, str]], fieldnames: List[str], path: Path, a
         print("")
 
     warnings: List[str] = []
-    if not all(mode in {2, 3} for mode in mode_counts):
-        warnings.append("mode_id is not GDS(2) or softmax GDS(3)")
-    if not target_reached:
-        warnings.append("scalar_s did not reach 80% of target")
-    if normal_dot_tangent and max(abs(value) for value in normal_dot_tangent) > 0.05:
+    if not dual_column_present or not dual_rows:
+        warnings.append("same-state Collision-only versus Escape A/B data was not recorded")
+    elif dual_no_effect:
+        warnings.append("Escape produced no measurable post-limit joint-acceleration change")
+    if (
+        drive_normal_dot_tangent and
+        max(abs(value) for value in drive_normal_dot_tangent) >
+        args.normal_tolerance_warn
+    ):
         warnings.append("tangent direction is not close to the current normal plane")
-    if supervisor_modes and all(int(round(value)) == 0 for value in supervisor_modes):
-        warnings.append("Stage-4 supervisor did not enter an active mode")
+    velocity_errors = finite_values(
+        parse_float(row, "tangent_escape_rmp_velocity_error_m_s")
+        for row in active_rows
+    )
+    if (
+        velocity_errors and
+        max(abs(value) for value in velocity_errors) > args.velocity_error_warn
+    ):
+        warnings.append("large tangent velocity tracking error")
+    if selected_feasible and any(value < 0.5 for value in selected_feasible):
+        warnings.append("an active record reported an infeasible selected candidate")
+    if handoff_violations:
+        warnings.append("CP/tangent changed before the Escape metric reached zero")
     if active_saturation:
         warnings.append("joint acceleration saturation occurred while escape was active")
     if math.isfinite(jerk) and jerk > args.jerk_warn:
@@ -515,7 +864,10 @@ def make_report(rows: List[Dict[str, str]], fieldnames: List[str], path: Path, a
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Check closed-loop behavior of the Stage-2 tangent escape RMP from a trace CSV."
+        description=(
+            "Check canonical tangent-escape closed-loop behavior from an "
+            "rmpflow trace CSV."
+        )
     )
     parser.add_argument(
         "csv",
@@ -546,6 +898,54 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=200.0,
         help="Warn when estimated qdd jerk norm exceeds this value.",
+    )
+    parser.add_argument(
+        "--normal-tolerance-warn",
+        type=float,
+        default=0.20,
+        help="Warn when |normal dot tangent| exceeds this value.",
+    )
+    parser.add_argument(
+        "--velocity-error-warn",
+        type=float,
+        default=0.10,
+        help="Warn when absolute tangent velocity error exceeds this value in m/s.",
+    )
+    parser.add_argument(
+        "--dual-effect-epsilon",
+        type=float,
+        default=1e-6,
+        help=(
+            "Post-limit delta-qdd norm at or below this value is counted as "
+            "unchanged in the same-state A/B check."
+        ),
+    )
+    parser.add_argument(
+        "--handoff-tangent-change",
+        type=float,
+        default=1e-3,
+        help="Direction-vector change counted as a tangent handoff.",
+    )
+    parser.add_argument(
+        "--handoff-lambda-tolerance",
+        type=float,
+        default=1e-3,
+        help="Maximum lambda allowed across a CP/tangent replacement.",
+    )
+    parser.add_argument(
+        "--handoff-metric-tolerance",
+        type=float,
+        default=1e-6,
+        help="Maximum effective metric allowed across a CP/tangent replacement.",
+    )
+    parser.add_argument(
+        "--handoff-fresh-dt",
+        type=float,
+        default=0.1,
+        help=(
+            "Maximum interval for judging a sampled handoff; slower samples are "
+            "reported as unobservable (default: 0.1 s)."
+        ),
     )
     return parser.parse_args()
 

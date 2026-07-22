@@ -66,12 +66,6 @@ public:
   using JointVector = Eigen::Matrix<double, 6, 1>;
   using Jacobian = Eigen::Matrix<double, 3, 6>;
 
-  struct PredictiveDuplicateSuccessors
-  {
-    std::array<std::size_t, 2> indices{0, 0};
-    std::size_t count{0};
-  };
-
   enum LinkIndex : std::size_t
   {
     BASE_LINK = 0,
@@ -105,53 +99,6 @@ public:
   static constexpr std::array<double, 6> joint_upper_limits{
     3.14159, 3.14159, 3.14159, 3.14159, 3.14159, 3.14159
   };
-
-  static constexpr PredictiveDuplicateSuccessors predictive_duplicate_successors(
-    std::size_t sensor_index)
-  {
-    PredictiveDuplicateSuccessors successors;
-    switch (sensor_index) {
-      case 4:   // tof_S -> tof3_1_S
-        successors.indices[0] = 8;
-        successors.count = 1;
-        break;
-      case 5:   // tof_E -> tof3_1_E
-        successors.indices[0] = 11;
-        successors.count = 1;
-        break;
-      case 6:   // tof_N -> tof3_1_N
-        successors.indices[0] = 10;
-        successors.count = 1;
-        break;
-      case 7:   // tof_W -> tof3_1_W
-        successors.indices[0] = 9;
-        successors.count = 1;
-        break;
-      case 8:   // tof3_1_S -> tof2_1_S / tof2_S
-        successors.indices[0] = 13;
-        successors.indices[1] = 17;
-        successors.count = 2;
-        break;
-      case 9:   // tof3_1_W -> tof2_1_W / tof2_W
-        successors.indices[0] = 14;
-        successors.indices[1] = 18;
-        successors.count = 2;
-        break;
-      case 10:  // tof3_1_N -> tof2_1_N / tof2_N
-        successors.indices[0] = 15;
-        successors.indices[1] = 19;
-        successors.count = 2;
-        break;
-      case 11:  // tof3_1_E -> tof2_1_E / tof2_E
-        successors.indices[0] = 12;
-        successors.indices[1] = 16;
-        successors.count = 2;
-        break;
-      default:
-        break;
-    }
-    return successors;
-  }
 
   inline static const std::array<ControlPointSpec, 5> control_point_specs{{
     {LINK1, LINK3, 10, 0.12},
